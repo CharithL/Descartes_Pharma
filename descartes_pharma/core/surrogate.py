@@ -131,16 +131,34 @@ def train_surrogate(model, train_data, val_data=None, epochs=200,
     return model
 
 
-def extract_hidden_states(model, data, device='cpu'):
-    """Extract hidden states from a trained surrogate model."""
+def extract_hidden_states(model, data, device='cpu', batch_size=16):
+    """Extract hidden states from a trained surrogate model.
+
+    Processes in mini-batches to avoid CUDA OOM on large datasets.
+    Hidden states are collected on CPU and concatenated at the end.
+    """
     model.to(device)
     model.eval()
 
-    with torch.no_grad():
-        inputs = torch.tensor(data['inputs'], dtype=torch.float32).to(device)
+    if isinstance(model, LSTMSurrogate):
+        all_inputs = data['inputs']  # (n_trials, timesteps, feat)
+        n_trials = all_inputs.shape[0]
+        hidden_chunks = []
 
-        if isinstance(model, LSTMSurrogate):
-            _, hidden = model(inputs, return_hidden=True)
-            return hidden.cpu().numpy().reshape(-1, model.hidden_dim)
-        else:
-            raise ValueError(f"Unsupported model type: {type(model)}")
+        with torch.no_grad():
+            for start in range(0, n_trials, batch_size):
+                end = min(start + batch_size, n_trials)
+                batch = torch.tensor(
+                    all_inputs[start:end], dtype=torch.float32
+                ).to(device)
+                _, h = model(batch, return_hidden=True)
+                # h: (batch, timesteps, hidden_dim) -> move to CPU immediately
+                hidden_chunks.append(h.cpu())
+                del batch, h
+                if device != 'cpu':
+                    torch.cuda.empty_cache()
+
+        hidden = torch.cat(hidden_chunks, dim=0).numpy()
+        return hidden.reshape(-1, model.hidden_dim)
+    else:
+        raise ValueError(f"Unsupported model type: {type(model)}")
