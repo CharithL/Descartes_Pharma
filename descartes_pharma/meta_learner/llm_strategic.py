@@ -1,150 +1,328 @@
 """
-DESCARTES-PHARMA v1.2 M11: LLM Strategic Reasoning Layer.
+Paradigm 7b -- LLM Strategic Reasoner
+Provides high-level strategic reasoning about the evaluation campaign
+when the HOT layer detects problems that require deliberative thinking.
 
-Triggered by HOT layer when meta-cognition detects problems.
-Provides strategic reasoning about the search process itself.
+This is a placeholder that structures the prompt and response format.
+In production, it would call an LLM API (OpenAI, Anthropic, etc.).
 """
 
-import json
+from __future__ import annotations
 
-SYSTEM_META_STRATEGIC = """You are the strategic reasoning layer of the \
-DESCARTES-PHARMA dual factory meta-learner. The HOT (Higher-Order Thought) \
-layer has detected an issue with the search process and is consulting you \
-for strategic guidance.
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
 
-Current factory state:
-{factory_state}
 
-HOT layer diagnosis:
-{hot_diagnosis}
+# ---------------------------------------------------------------------------
+# System prompt for meta-strategic reasoning
+# ---------------------------------------------------------------------------
 
-VZS statistics:
-{vzs_stats}
+SYSTEM_META_STRATEGIC = """You are the strategic reasoning layer of the Descartes-Pharma
+mechanistic interpretability evaluation system. You are called when
+the meta-cognition (HOT) layer detects a problem with the current
+evaluation campaign.
 
-VFE belief summary:
-{vfe_summary}
+Your role:
+1. Analyze the current state of the evaluation campaign.
+2. Identify why progress has stalled, results are anomalous, or
+   resources are being wasted.
+3. Recommend a concrete action plan.
 
-Campaign history:
-{campaign_history}
+Context you will receive:
+- mechanism_name: the mechanism being evaluated
+- architecture: the model architecture
+- current_tier: which probe cascade tier we are on
+- evidence_so_far: list of (probe_type, delta_r2, p_value) tuples
+- hot_assessment: the HOT layer's diagnostic scores
+- belief_state: the VFE belief system's current mu, sigma, confidence
+- timescale_state: multi-timescale processor summary
 
-Your role is NOT to suggest specific probes or architectures (the neural
-fast path handles that). Your role is STRATEGIC:
+Your response must be structured JSON with these fields:
+{
+  "diagnosis": "1-2 sentence diagnosis of what is going wrong",
+  "root_cause": "STAGNATION | REDUNDANCY | ANOMALY | EXHAUSTION | CONFLICT | UNKNOWN",
+  "recommended_actions": [
+    {"action": "skip_to_tier_3", "reason": "..."},
+    {"action": "add_probe_type_X", "reason": "..."}
+  ],
+  "confidence_in_diagnosis": 0.0-1.0,
+  "should_halt": false,
+  "reasoning": "detailed chain-of-thought reasoning"
+}
 
-1. Is the search process stuck for a FUNDAMENTAL reason?
-2. Should the factory PIVOT to a different search strategy?
-3. Are there CROSS-CAMPAIGN patterns the DreamCoder missed?
-4. Should this campaign be TERMINATED early?
+Guidelines:
+- Be conservative: do not recommend halting unless evidence is overwhelming.
+- Prefer escalation (trying more powerful probes) over halting.
+- If results conflict, recommend targeted probes to resolve the conflict.
+- Consider compute budget: do not recommend expensive probes if cheap ones
+  have not been exhausted.
+- If the mechanism is likely a zombie, recommend the minimum additional
+  evidence needed to reach VERIFIED tier in the zombie store.
+"""
 
-Respond with ONLY valid JSON:
-{{
-  "diagnosis": "one-sentence summary of what's wrong",
-  "root_cause": "STUCK | WRONG_APPROACH | MISSING_DATA | EXHAUSTED | ANOMALY",
-  "recommended_pivot": "specific strategic change",
-  "confidence": 0.0-1.0,
-  "should_terminate": true/false,
-  "cross_campaign_insight": "pattern discovered or null"
-}}"""
 
+# ---------------------------------------------------------------------------
+# Data structures
+# ---------------------------------------------------------------------------
+
+@dataclass
+class StrategicRecommendation:
+    """Output from the LLM strategic reasoner."""
+    diagnosis: str
+    root_cause: str
+    recommended_actions: List[Dict[str, str]]
+    confidence_in_diagnosis: float
+    should_halt: bool
+    reasoning: str
+    raw_response: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Strategic reasoner
+# ---------------------------------------------------------------------------
 
 class LLMStrategicReasoner:
     """
-    LLM strategic reasoning, triggered by HOT layer.
+    Invokes an LLM for strategic reasoning about the evaluation campaign.
 
-    Key distinction from LLM Balloon (v1.1):
-    - Balloon proposes NOVEL ARCHITECTURES AND PROBES
-    - Strategic Reasoner diagnoses WHY THE SEARCH IS FAILING
+    In production, this would call an actual LLM API. Here it provides
+    a structured placeholder that returns heuristic-based recommendations.
     """
 
-    def __init__(self, model='claude-sonnet-4-20250514'):
+    def __init__(
+        self,
+        system_prompt: str = SYSTEM_META_STRATEGIC,
+        api_key: Optional[str] = None,
+        model: str = "gpt-4",
+        temperature: float = 0.3,
+    ):
+        self.system_prompt = system_prompt
+        self.api_key = api_key
         self.model = model
-        self.reasoning_history = []
+        self.temperature = temperature
 
-    def reason(self, factory_state, hot_diagnosis, vzs, vfe_system,
-               campaign_history):
+    def reason(
+        self,
+        mechanism_name: str,
+        architecture: str,
+        current_tier: int,
+        evidence_so_far: List[Dict[str, Any]],
+        hot_assessment: Optional[Dict[str, Any]] = None,
+        belief_state: Optional[Dict[str, Any]] = None,
+        timescale_state: Optional[Dict[str, Any]] = None,
+    ) -> StrategicRecommendation:
         """
-        Run LLM strategic reasoning.
+        Perform strategic reasoning about the current campaign.
 
-        Requires ANTHROPIC_API_KEY environment variable.
-        Falls back to heuristic reasoning if API unavailable.
+        In production, this would:
+        1. Format the context into a prompt
+        2. Call the LLM API
+        3. Parse the structured response
+
+        For now, it returns a heuristic-based recommendation.
         """
-        try:
-            import os
-            api_key = os.environ.get('ANTHROPIC_API_KEY')
-            if not api_key:
-                return self._heuristic_reasoning(hot_diagnosis)
+        # Build the user prompt
+        user_prompt = self._build_prompt(
+            mechanism_name, architecture, current_tier,
+            evidence_so_far, hot_assessment, belief_state, timescale_state,
+        )
 
-            import requests
-            prompt = SYSTEM_META_STRATEGIC.format(
-                factory_state=json.dumps(factory_state, indent=2, default=str),
-                hot_diagnosis=json.dumps(hot_diagnosis, indent=2, default=str),
-                vzs_stats=json.dumps(vzs.get_stats(), indent=2),
-                vfe_summary=self._summarize_vfe(vfe_system),
-                campaign_history=self._summarize_campaigns(campaign_history),
+        # --- Placeholder: heuristic-based reasoning ---
+        # In production, replace this block with:
+        #   response = openai.ChatCompletion.create(
+        #       model=self.model,
+        #       messages=[
+        #           {"role": "system", "content": self.system_prompt},
+        #           {"role": "user", "content": user_prompt},
+        #       ],
+        #       temperature=self.temperature,
+        #   )
+        #   return self._parse_response(response)
+
+        return self._heuristic_reason(
+            mechanism_name, architecture, current_tier,
+            evidence_so_far, hot_assessment, belief_state,
+        )
+
+    def _build_prompt(
+        self,
+        mechanism_name: str,
+        architecture: str,
+        current_tier: int,
+        evidence_so_far: List[Dict[str, Any]],
+        hot_assessment: Optional[Dict[str, Any]],
+        belief_state: Optional[Dict[str, Any]],
+        timescale_state: Optional[Dict[str, Any]],
+    ) -> str:
+        """Format all context into a structured prompt for the LLM."""
+        lines = [
+            f"## Current Campaign State",
+            f"- Mechanism: {mechanism_name}",
+            f"- Architecture: {architecture}",
+            f"- Current Tier: {current_tier}",
+            f"- Evidence count: {len(evidence_so_far)}",
+            "",
+            "## Evidence So Far",
+        ]
+        for i, ev in enumerate(evidence_so_far):
+            lines.append(
+                f"  {i+1}. probe={ev.get('probe_type', '?')}, "
+                f"delta_r2={ev.get('delta_r2', 0):.4f}, "
+                f"p_value={ev.get('p_value', 1):.4f}"
             )
 
-            response = requests.post(
-                'https://api.anthropic.com/v1/messages',
-                headers={
-                    'Content-Type': 'application/json',
-                    'x-api-key': api_key,
-                    'anthropic-version': '2023-06-01',
-                },
-                json={
-                    'model': self.model,
-                    'max_tokens': 1000,
-                    'messages': [{'role': 'user', 'content': prompt}]
-                }
+        if hot_assessment:
+            lines.append("")
+            lines.append("## HOT Assessment")
+            for k, v in hot_assessment.items():
+                lines.append(f"  - {k}: {v}")
+
+        if belief_state:
+            lines.append("")
+            lines.append("## Belief State (VFE)")
+            for k, v in belief_state.items():
+                lines.append(f"  - {k}: {v}")
+
+        if timescale_state:
+            lines.append("")
+            lines.append("## Timescale State")
+            for k, v in timescale_state.items():
+                lines.append(f"  - {k}: {v}")
+
+        lines.append("")
+        lines.append("Please analyze and provide your structured recommendation.")
+        return "\n".join(lines)
+
+    def _heuristic_reason(
+        self,
+        mechanism_name: str,
+        architecture: str,
+        current_tier: int,
+        evidence_so_far: List[Dict[str, Any]],
+        hot_assessment: Optional[Dict[str, Any]],
+        belief_state: Optional[Dict[str, Any]],
+    ) -> StrategicRecommendation:
+        """
+        Fallback heuristic reasoning when no LLM API is available.
+        Analyzes the evidence pattern and produces a recommendation.
+        """
+        n_evidence = len(evidence_so_far)
+
+        # Analyze evidence pattern
+        if n_evidence == 0:
+            return StrategicRecommendation(
+                diagnosis="No evidence collected yet.",
+                root_cause="UNKNOWN",
+                recommended_actions=[
+                    {"action": "start_tier_0", "reason": "Begin with fast linear probes"}
+                ],
+                confidence_in_diagnosis=0.9,
+                should_halt=False,
+                reasoning="Campaign has not started. Begin with tier 0 probes.",
             )
 
-            data = response.json()
-            text = data['content'][0]['text']
+        significant = [e for e in evidence_so_far if e.get("p_value", 1) < 0.05]
+        mean_r2 = sum(e.get("delta_r2", 0) for e in evidence_so_far) / n_evidence
+        sig_ratio = len(significant) / n_evidence
 
-            reasoning = json.loads(text)
-            self.reasoning_history.append(reasoning)
-            return reasoning
+        # Check HOT assessment
+        hot = hot_assessment or {}
+        stagnation = hot.get("stagnation_score", 0)
+        redundancy = hot.get("redundancy_score", 0)
+        anomaly = hot.get("anomaly_score", 0)
+        exhaustion = hot.get("exhaustion_score", 0)
 
-        except Exception as e:
-            print(f"LLM strategic reasoning error: {e}")
-            return self._heuristic_reasoning(hot_diagnosis)
+        actions = []
+        root_cause = "UNKNOWN"
+        diagnosis = ""
 
-    def _heuristic_reasoning(self, hot_diagnosis):
-        """Fallback when LLM API unavailable."""
-        diagnosis = hot_diagnosis if isinstance(hot_diagnosis, dict) else {}
+        if anomaly > 0.7:
+            root_cause = "ANOMALY"
+            diagnosis = (
+                f"Anomalous results detected (score={anomaly:.2f}). "
+                "Recent probe returned an outlier that conflicts with prior evidence."
+            )
+            actions.append({
+                "action": "rerun_last_probe",
+                "reason": "Verify the anomalous result is not a fluke"
+            })
+            actions.append({
+                "action": "add_targeted_probe",
+                "reason": "Use a different probe type to cross-validate"
+            })
 
-        if diagnosis.get('stagnation', {}).get('detected'):
-            return {
-                'diagnosis': 'Search stagnating without improvement',
-                'root_cause': 'STUCK',
-                'recommended_pivot': 'Try different architecture families or loss functions',
-                'confidence': 0.5,
-                'should_terminate': False,
-                'cross_campaign_insight': None,
-            }
+        elif exhaustion > 0.6:
+            root_cause = "EXHAUSTION"
+            diagnosis = (
+                f"Diminishing returns (exhaustion={exhaustion:.2f}). "
+                f"Mean R2={mean_r2:.3f} with {sig_ratio:.0%} significant probes."
+            )
+            if sig_ratio > 0.6:
+                actions.append({
+                    "action": "issue_verdict",
+                    "reason": "Sufficient evidence for a confident verdict"
+                })
+            else:
+                actions.append({
+                    "action": f"skip_to_tier_{min(current_tier + 1, 4)}",
+                    "reason": "Try more powerful probes before halting"
+                })
 
-        return {
-            'diagnosis': 'No clear issue detected by heuristics',
-            'root_cause': 'UNKNOWN',
-            'recommended_pivot': 'Continue normal search',
-            'confidence': 0.3,
-            'should_terminate': False,
-            'cross_campaign_insight': None,
-        }
+        elif stagnation > 0.5 and redundancy > 0.5:
+            root_cause = "STAGNATION"
+            diagnosis = (
+                f"Stagnation ({stagnation:.2f}) with redundancy ({redundancy:.2f}). "
+                "Current probes are not adding new information."
+            )
+            actions.append({
+                "action": f"skip_to_tier_{min(current_tier + 1, 4)}",
+                "reason": "Escalate to more powerful probes"
+            })
 
-    def _summarize_vfe(self, vfe_system):
-        summary = {}
-        for key, belief in vfe_system.beliefs.items():
-            summary[key] = {
-                'zombie_prob': round(belief['mean'], 3),
-                'uncertainty': round(belief['variance'], 3),
-                'n_updates': belief['n_updates'],
-            }
-        return json.dumps(summary, indent=2)
+        elif redundancy > 0.6:
+            root_cause = "REDUNDANCY"
+            diagnosis = f"High redundancy ({redundancy:.2f}). Probes are giving similar results."
+            actions.append({
+                "action": "diversify_probes",
+                "reason": "Switch to a different probe type for new information"
+            })
 
-    def _summarize_campaigns(self, history):
-        if not history:
-            return "No previous campaigns"
-        if isinstance(history, list):
-            return json.dumps([{
-                'dataset': h.get('dataset') if isinstance(h, dict) else str(h),
-            } for h in history[-5:]], indent=2)
-        return str(history)
+        else:
+            # Check if there is a conflict in evidence
+            if 0.3 < sig_ratio < 0.7:
+                root_cause = "CONFLICT"
+                diagnosis = (
+                    f"Conflicting evidence: {sig_ratio:.0%} of probes are significant. "
+                    "The mechanism's status is genuinely ambiguous."
+                )
+                actions.append({
+                    "action": "add_causal_probes",
+                    "reason": "Use causal probes (ablation/DAS) to resolve the conflict"
+                })
+            else:
+                diagnosis = "No major issues detected. Campaign is proceeding normally."
+                actions.append({
+                    "action": "continue",
+                    "reason": "Current trajectory is productive"
+                })
+
+        should_halt = (
+            exhaustion > 0.8
+            and n_evidence >= 8
+            and (sig_ratio > 0.8 or sig_ratio < 0.2)
+        )
+
+        return StrategicRecommendation(
+            diagnosis=diagnosis,
+            root_cause=root_cause,
+            recommended_actions=actions,
+            confidence_in_diagnosis=min(0.5 + n_evidence * 0.05, 0.9),
+            should_halt=should_halt,
+            reasoning=(
+                f"Analyzed {n_evidence} evidence records. "
+                f"Significance ratio: {sig_ratio:.2f}, Mean R2: {mean_r2:.4f}. "
+                f"HOT scores: stag={stagnation:.2f}, red={redundancy:.2f}, "
+                f"anom={anomaly:.2f}, exh={exhaustion:.2f}. "
+                f"Root cause identified as {root_cause}."
+            ),
+        )
