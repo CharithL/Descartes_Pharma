@@ -7,7 +7,7 @@ Supports LSTM (for HH simulator) and GNN (for molecular datasets).
 import torch
 import torch.nn as nn
 import numpy as np
-from typing import Optional
+from typing import Optional, Dict, Tuple
 
 
 class LSTMSurrogate(nn.Module):
@@ -88,28 +88,68 @@ class GNNSurrogate(nn.Module):
         return out
 
 
-def train_surrogate(model, train_data, val_data=None, epochs=200,
-                    lr=1e-3, device='cpu'):
-    """Train a surrogate model with early stopping."""
+def normalize_data(data: Dict) -> Tuple[Dict, Dict]:
+    """Z-score normalize inputs and outputs. Returns normalized data and stats."""
+    stats = {}
+    normalized = {}
+
+    for key in ['inputs', 'outputs']:
+        arr = data[key]
+        mean = arr.mean()
+        std = arr.std() + 1e-8
+        normalized[key] = (arr - mean) / std
+        stats[key] = {'mean': mean, 'std': std}
+
+    # Copy non-numeric fields
+    for key in data:
+        if key not in ['inputs', 'outputs']:
+            normalized[key] = data[key]
+
+    return normalized, stats
+
+
+def train_surrogate(model, train_data, val_data=None, epochs=300,
+                    lr=1e-3, device='cpu', batch_size=32):
+    """Train a surrogate model with mini-batching, LR scheduling, and best-model checkpoint."""
     model = model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, patience=20, factor=0.5, min_lr=1e-6)
     criterion = nn.MSELoss()
+
+    train_inputs = torch.tensor(train_data['inputs'], dtype=torch.float32)
+    train_targets = torch.tensor(train_data['outputs'], dtype=torch.float32)
+    n_train = train_inputs.shape[0]
+
     best_val_loss = float('inf')
-    patience_counter = 0
+    best_state = None
 
     for epoch in range(epochs):
         model.train()
-        inputs = torch.tensor(train_data['inputs'], dtype=torch.float32).to(device)
-        targets = torch.tensor(train_data['outputs'], dtype=torch.float32).to(device)
+        perm = torch.randperm(n_train)
+        epoch_loss = 0.0
+        n_batches = 0
 
-        optimizer.zero_grad()
-        outputs = model(inputs)
-        loss = criterion(outputs, targets)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
+        for start in range(0, n_train, batch_size):
+            idx = perm[start:start + batch_size]
+            batch_in = train_inputs[idx].to(device)
+            batch_tgt = train_targets[idx].to(device)
 
-        if val_data is not None and epoch % 10 == 0:
+            optimizer.zero_grad()
+            outputs = model(batch_in)
+            loss = criterion(outputs, batch_tgt)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+
+            epoch_loss += loss.item()
+            n_batches += 1
+
+        avg_train_loss = epoch_loss / max(n_batches, 1)
+
+        # Validation
+        val_loss = avg_train_loss
+        if val_data is not None and epoch % 5 == 0:
             model.eval()
             with torch.no_grad():
                 val_in = torch.tensor(val_data['inputs'], dtype=torch.float32).to(device)
@@ -118,15 +158,19 @@ def train_surrogate(model, train_data, val_data=None, epochs=200,
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                patience_counter = 0
-            else:
-                patience_counter += 1
-                if patience_counter >= 10:
-                    print(f"Early stopping at epoch {epoch}")
-                    break
+                best_state = {k: v.clone() for k, v in model.state_dict().items()}
+
+        scheduler.step(val_loss)
 
         if epoch % 50 == 0:
-            print(f"Epoch {epoch}: train_loss={loss.item():.6f}")
+            cur_lr = optimizer.param_groups[0]['lr']
+            print(f"Epoch {epoch}: train={avg_train_loss:.6f} "
+                  f"val={val_loss:.6f} lr={cur_lr:.6f}")
+
+    # Restore best model
+    if best_state is not None:
+        model.load_state_dict(best_state)
+        print(f"Restored best model (val_loss={best_val_loss:.6f})")
 
     return model
 
@@ -136,6 +180,7 @@ def extract_hidden_states(model, data, device='cpu', batch_size=16):
 
     Processes in mini-batches to avoid CUDA OOM on large datasets.
     Hidden states are collected on CPU and concatenated at the end.
+    Returns 3D array: (n_trials, timesteps, hidden_dim).
     """
     model.to(device)
     model.eval()
@@ -152,13 +197,12 @@ def extract_hidden_states(model, data, device='cpu', batch_size=16):
                     all_inputs[start:end], dtype=torch.float32
                 ).to(device)
                 _, h = model(batch, return_hidden=True)
-                # h: (batch, timesteps, hidden_dim) -> move to CPU immediately
                 hidden_chunks.append(h.cpu())
                 del batch, h
                 if device != 'cpu':
                     torch.cuda.empty_cache()
 
         hidden = torch.cat(hidden_chunks, dim=0).numpy()
-        return hidden.reshape(-1, model.hidden_dim)
+        return hidden  # (n_trials, timesteps, hidden_dim)
     else:
         raise ValueError(f"Unsupported model type: {type(model)}")

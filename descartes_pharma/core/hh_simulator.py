@@ -114,29 +114,23 @@ class HodgkinHuxleySimulator:
         target_names = ['m', 'h', 'n', 'I_Na', 'I_K', 'g_Na_eff', 'g_K_eff']
 
         for i in range(n_trials):
-            pattern_type = rng.choice(['step', 'ramp', 'noisy', 'pulse_train'])
+            pattern_type = rng.choice(['step', 'ramp', 'pulse_train'])
 
+            # Amplitudes 5-25 µA/cm² to ensure spiking (threshold ~6-7)
             if pattern_type == 'step':
-                amplitude = rng.uniform(0, 20)
-                onset = rng.uniform(10, 30)
+                amplitude = rng.uniform(5, 25)
+                onset = rng.uniform(2, T * 0.3)
                 I_func = lambda t, a=amplitude, o=onset: a if t > o else 0.0
 
             elif pattern_type == 'ramp':
-                rate = rng.uniform(0.1, 0.5)
-                I_func = lambda t, r=rate: r * t
-
-            elif pattern_type == 'noisy':
-                mean_I = rng.uniform(5, 15)
-                noise_std = rng.uniform(1, 5)
-                noise = rng.normal(mean_I, noise_std, t_steps)
-                I_func = lambda t, n=noise, d=dt: n[min(int(t / d), len(n) - 1)]
+                amplitude = rng.uniform(5, 25)
+                I_func = lambda t, a=amplitude, T_=T: min(a, a * t / (T_ * 0.3))
 
             elif pattern_type == 'pulse_train':
-                freq = rng.uniform(10, 100)
+                freq = rng.uniform(20, 80)
                 amplitude = rng.uniform(10, 30)
-                duty = rng.uniform(0.1, 0.5)
-                I_func = lambda t, f=freq, a=amplitude, d=duty: \
-                    a if (t * f / 1000) % 1.0 < d else 0.0
+                I_func = lambda t, f=freq, a=amplitude: \
+                    a if (t * f / 1000) % 1.0 < 0.3 else 0.0
 
             result = self.simulate(I_func, T, dt)
 

@@ -19,16 +19,17 @@ class DescartesPharmaConfig:
     tier: int = 1
 
     # HH Simulator settings
-    hh_n_trials: int = 200
-    hh_T: float = 100.0
-    hh_dt: float = 0.01
+    hh_n_trials: int = 300
+    hh_T: float = 30.0
+    hh_dt: float = 0.05
 
     # Surrogate settings
     surrogate_type: str = 'lstm'
     hidden_dim: int = 64
     n_layers: int = 2
-    epochs: int = 200
+    epochs: int = 300
     learning_rate: float = 1e-3
+    batch_size: int = 32
 
     # Probing settings
     probe_methods: List[str] = field(default_factory=lambda: [
