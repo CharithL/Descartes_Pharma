@@ -49,31 +49,47 @@ class PharmaSAE(nn.Module):
 
 
 def train_sae(embeddings_list, input_dim, expansion_factor=8, k=30,
-              epochs=200, lr=1e-3, l1_weight=1e-4, device='cpu'):
-    """Train SAE on model embeddings."""
+              epochs=200, lr=1e-3, l1_weight=1e-4, device='cpu',
+              batch_size=4096):
+    """Train SAE on model embeddings with mini-batch training."""
     sae = PharmaSAE(input_dim, expansion_factor, k).to(device)
     optimizer = torch.optim.Adam(sae.parameters(), lr=lr)
 
     all_emb = np.concatenate(embeddings_list, axis=0)
-    tensor_emb = torch.tensor(all_emb, dtype=torch.float32).to(device)
+    n_samples = all_emb.shape[0]
 
     loss_history = []
     for epoch in range(epochs):
-        optimizer.zero_grad()
-        recon, sparse = sae(tensor_emb)
-        recon_loss = nn.functional.mse_loss(recon, tensor_emb)
-        l1_loss = l1_weight * sparse.abs().mean()
-        total_loss = recon_loss + l1_loss
-        total_loss.backward()
-        optimizer.step()
+        # Shuffle each epoch
+        perm = np.random.permutation(n_samples)
+        epoch_loss = 0.0
+        n_batches = 0
 
-        with torch.no_grad():
-            sae.decoder.weight.data = nn.functional.normalize(
-                sae.decoder.weight.data, dim=0)
+        for start in range(0, n_samples, batch_size):
+            end = min(start + batch_size, n_samples)
+            batch_idx = perm[start:end]
+            batch = torch.tensor(
+                all_emb[batch_idx], dtype=torch.float32).to(device)
 
-        loss_history.append(total_loss.item())
+            optimizer.zero_grad()
+            recon, sparse = sae(batch)
+            recon_loss = nn.functional.mse_loss(recon, batch)
+            l1_loss = l1_weight * sparse.abs().mean()
+            total_loss = recon_loss + l1_loss
+            total_loss.backward()
+            optimizer.step()
+
+            with torch.no_grad():
+                sae.decoder.weight.data = nn.functional.normalize(
+                    sae.decoder.weight.data, dim=0)
+
+            epoch_loss += total_loss.item()
+            n_batches += 1
+
+        avg_loss = epoch_loss / max(n_batches, 1)
+        loss_history.append(avg_loss)
         if epoch % 50 == 0:
-            print(f"SAE Epoch {epoch}: loss={total_loss.item():.6f}")
+            print(f"SAE Epoch {epoch}: loss={avg_loss:.6f}")
 
     return sae, loss_history
 
