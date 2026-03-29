@@ -735,7 +735,8 @@ sae_results = sae_probe_molecular_mechanisms(
 )
 
 print(f"\n  SAE Results:")
-print(f"    Alive features: {sae_results['n_alive']}/{sae_results['n_total']}")
+n_total_sae = sae_results['correlation_matrix'].shape[0]
+print(f"    Alive features: {sae_results['n_alive']}/{n_total_sae}")
 print(f"    Mean monosemanticity: {sae_results['mean_monosemanticity']:.4f}")
 
 print(f"\n  {'Mechanism':<14} {'SAE R2':>8} {'Raw R2':>8} {'Delta':>8} "
