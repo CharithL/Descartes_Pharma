@@ -125,8 +125,20 @@ print("=" * 80)
 # ---- Data loading ----
 print("\n[1/4] Loading Tox21 dataset from TDC...")
 from tdc.single_pred import Tox
+from tdc.utils import retrieve_label_name_list
 
-tox21_data = Tox(name='Tox21')
+# Tox21 has 12 assay endpoints -- must select one
+available_labels = retrieve_label_name_list('Tox21')
+print(f"  Available Tox21 assays: {available_labels}")
+
+# Use SR-ARE (stress response) as representative task
+# Fallback to first available if SR-ARE not found
+SELECTED_LABEL = 'SR-ARE'
+if SELECTED_LABEL not in available_labels:
+    SELECTED_LABEL = available_labels[0]
+print(f"  Selected assay: {SELECTED_LABEL}")
+
+tox21_data = Tox(name='Tox21', label_name=SELECTED_LABEL)
 split = tox21_data.get_split(method='scaffold')
 train_df, val_df, test_df = split['train'], split['valid'], split['test']
 print(f"  Train: {len(train_df)}, Val: {len(val_df)}, Test: {len(test_df)}")
