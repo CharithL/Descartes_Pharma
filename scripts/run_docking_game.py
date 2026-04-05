@@ -310,15 +310,26 @@ def run_phase1():
     print("\n  [6/7] Testing Vina/fallback scoring on one molecule...")
     vina_model = None
     test_score = 0.0
+
+    # Use ACTUAL pocket center from parsed catalytic residues (not hardcoded)
+    if pocket and pocket.catalytic_residues:
+        cat_centers = [cr.center for cr in pocket.catalytic_residues]
+        actual_pocket_center = tuple(np.mean(cat_centers, axis=0).tolist())
+    else:
+        actual_pocket_center = tuple(pocket.pocket_center.tolist()) if pocket else (21.5, 26.5, 7.7)
+    print(f"    Vina grid box center: {[round(c,1) for c in actual_pocket_center]}")
+    print(f"    Vina grid box size: [30, 30, 30]")
+
     try:
         vina_model = VinaWorldModel(
             receptor_pdbqt_path=pdbqt_path,
-            center=BACE1_POCKET_CENTER if POCKET_AVAILABLE else (28.0, 15.0, 22.0),
-            box_size=(25.0, 25.0, 25.0),
+            center=actual_pocket_center,
+            box_size=(30.0, 30.0, 30.0),  # Larger box for 108-residue pocket
         )
-        # Score the first test ligand using meeko/obabel for proper PDBQT
+        # Translate ligand to pocket center before scoring
         lig = test_ligands[0]
-        pdbqt_str = _coords_to_pdbqt(lig.conformer_coords, mol=lig.mol)
+        centered_mol = _center_mol_on_pocket(lig.mol, actual_pocket_center)
+        pdbqt_str = _mol_to_pdbqt(centered_mol)
         result = vina_model.score_pose(pdbqt_str)
         test_score = result.total_energy
         print(f"    Vina test score: {test_score:.3f} kcal/mol "
@@ -326,7 +337,8 @@ def run_phase1():
     except Exception as e:
         logger.warning(f"    Vina scoring failed: {e}. Using simple scorer.")
         vina_model = _create_fallback_scorer(pdbqt_path)
-        pdbqt_str = _coords_to_pdbqt(test_ligands[0].conformer_coords, mol=test_ligands[0].mol)
+        lig = test_ligands[0]
+        pdbqt_str = _coords_to_pdbqt(lig.conformer_coords, mol=lig.mol)
         result = vina_model.score_pose(pdbqt_str)
         test_score = result.total_energy
         print(f"    Fallback test score: {test_score:.3f}")
@@ -1194,22 +1206,44 @@ def _create_fallback_ligand(smiles: str):
     )
 
 
-def _create_fallback_scorer(pdbqt_path: str):
+def _create_fallback_scorer(pdbqt_path: str, center=(21.5, 26.5, 7.7)):
     """Create a scorer — VinaWorldModel with automatic fallback on error."""
     from descartes_pharma_docking.vina_engine.vina_scorer import FallbackVinaModel
     try:
         model = VinaWorldModel(
             receptor_pdbqt_path=pdbqt_path,
-            center=(28.0, 15.0, 22.0),
-            box_size=(25.0, 25.0, 25.0),
+            center=center,
+            box_size=(30.0, 30.0, 30.0),
         )
         return model
     except Exception:
         return FallbackVinaModel(
             receptor_pdbqt_path=pdbqt_path,
-            center=(28.0, 15.0, 22.0),
-            box_size=(25.0, 25.0, 25.0),
+            center=center,
+            box_size=(30.0, 30.0, 30.0),
         )
+
+
+def _center_mol_on_pocket(mol, pocket_center):
+    """Translate an RDKit mol's conformer so its centroid is at pocket_center."""
+    from rdkit import Chem
+    from rdkit.Geometry import Point3D
+    mol = Chem.RWMol(mol)
+    if mol.GetNumConformers() == 0:
+        from rdkit.Chem import AllChem
+        mol2 = Chem.AddHs(mol)
+        AllChem.EmbedMolecule(mol2, AllChem.ETKDGv3())
+        AllChem.MMFFOptimizeMolecule(mol2)
+        mol = mol2
+    conf = mol.GetConformer()
+    coords = np.array(conf.GetPositions())
+    centroid = coords.mean(axis=0)
+    shift = np.array(pocket_center) - centroid
+    for i in range(mol.GetNumAtoms()):
+        pos = conf.GetAtomPosition(i)
+        conf.SetAtomPosition(i, Point3D(
+            pos.x + shift[0], pos.y + shift[1], pos.z + shift[2]))
+    return mol
 
 
 def _mol_to_pdbqt(mol) -> str:
