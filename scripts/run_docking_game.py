@@ -1213,14 +1213,14 @@ def _create_fallback_scorer(pdbqt_path: str):
 
 
 def _coords_to_pdbqt(coords: np.ndarray) -> str:
-    """Convert numpy coordinates to a minimal PDBQT string."""
-    lines = ["MODEL 1"]
+    """Convert numpy coordinates to a minimal PDBQT string (no MODEL tags)."""
+    lines = []
     for i, (x, y, z) in enumerate(coords):
         lines.append(
             f"ATOM  {i+1:5d}  C   LIG A   1    "
-            f"{x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00    0.000 C"
+            f"{x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00    +0.000  C"
         )
-    lines.append("ENDMDL")
+    lines.append("END")
     return "\n".join(lines)
 
 
