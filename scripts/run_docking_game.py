@@ -59,7 +59,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 logger.info(f"PyTorch device: {DEVICE}")
 if DEVICE == "cuda":
     gpu_name = torch.cuda.get_device_name(0)
-    gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1e9
+    gpu_mem = torch.cuda.get_device_properties(0).total_memoryory / 1e9
     logger.info(f"GPU: {gpu_name} ({gpu_mem:.1f} GB)")
 
 # ---------------------------------------------------------------------------
@@ -1515,7 +1515,7 @@ def main():
     print(f"  Device:    {DEVICE}")
     if DEVICE == "cuda":
         print(f"  GPU:       {torch.cuda.get_device_name(0)}")
-        vram = torch.cuda.get_device_properties(0).total_mem / 1e9
+        vram = torch.cuda.get_device_properties(0).total_memory / 1e9
         print(f"  VRAM:      {vram:.1f} GB")
     print(f"  Project:   {PROJECT_ROOT}")
     print(f"  Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}")
