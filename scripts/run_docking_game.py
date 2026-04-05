@@ -316,9 +316,9 @@ def run_phase1():
             center=BACE1_POCKET_CENTER if POCKET_AVAILABLE else (28.0, 15.0, 22.0),
             box_size=(25.0, 25.0, 25.0),
         )
-        # Score the first test ligand
+        # Score the first test ligand using meeko/obabel for proper PDBQT
         lig = test_ligands[0]
-        pdbqt_str = _coords_to_pdbqt(lig.conformer_coords)
+        pdbqt_str = _coords_to_pdbqt(lig.conformer_coords, mol=lig.mol)
         result = vina_model.score_pose(pdbqt_str)
         test_score = result.total_energy
         print(f"    Vina test score: {test_score:.3f} kcal/mol "
@@ -326,7 +326,7 @@ def run_phase1():
     except Exception as e:
         logger.warning(f"    Vina scoring failed: {e}. Using simple scorer.")
         vina_model = _create_fallback_scorer(pdbqt_path)
-        pdbqt_str = _coords_to_pdbqt(test_ligands[0].conformer_coords)
+        pdbqt_str = _coords_to_pdbqt(test_ligands[0].conformer_coords, mol=test_ligands[0].mol)
         result = vina_model.score_pose(pdbqt_str)
         test_score = result.total_energy
         print(f"    Fallback test score: {test_score:.3f}")
@@ -1212,14 +1212,120 @@ def _create_fallback_scorer(pdbqt_path: str):
         )
 
 
-def _coords_to_pdbqt(coords: np.ndarray) -> str:
-    """Convert numpy coordinates to a minimal PDBQT string (no MODEL tags)."""
-    lines = []
+def _mol_to_pdbqt(mol) -> str:
+    """Convert an RDKit mol (with conformer) to Vina-compatible PDBQT using meeko or obabel."""
+    from rdkit import Chem
+    from rdkit.Chem import AllChem
+    import tempfile, subprocess, os
+
+    # Ensure 3D coords and hydrogens
+    if mol.GetNumConformers() == 0:
+        mol = Chem.AddHs(mol)
+        AllChem.EmbedMolecule(mol, AllChem.ETKDGv3())
+        AllChem.MMFFOptimizeMolecule(mol)
+
+    # Write mol to SDF
+    sdf_path = tempfile.mktemp(suffix='.sdf')
+    pdbqt_path = tempfile.mktemp(suffix='.pdbqt')
+
+    try:
+        writer = Chem.SDWriter(sdf_path)
+        writer.write(mol)
+        writer.close()
+
+        # Try meeko first (official AutoDock tool)
+        try:
+            from meeko import MoleculePreparation, PDBQTWriterLegacy
+            preparator = MoleculePreparation()
+            mol_setups = preparator.prepare(mol)
+            pdbqt_string, is_ok, err = PDBQTWriterLegacy.write_string(mol_setups[0])
+            if is_ok:
+                # Remove MODEL/ENDMDL if present
+                lines = [l for l in pdbqt_string.split('\n')
+                         if not l.startswith('MODEL') and not l.startswith('ENDMDL')]
+                return '\n'.join(lines)
+        except Exception:
+            pass
+
+        # Try obabel
+        try:
+            result = subprocess.run(
+                ['obabel', sdf_path, '-O', pdbqt_path, '-p', '7.4'],
+                capture_output=True, text=True, timeout=30
+            )
+            if result.returncode == 0 and os.path.exists(pdbqt_path):
+                with open(pdbqt_path) as f:
+                    content = f.read()
+                # Remove MODEL/ENDMDL
+                lines = [l for l in content.split('\n')
+                         if not l.startswith('MODEL') and not l.startswith('ENDMDL')]
+                return '\n'.join(lines)
+        except Exception:
+            pass
+
+        # Last resort: manual PDBQT with ROOT/ENDROOT (Vina ligand format)
+        return _manual_ligand_pdbqt(mol)
+
+    finally:
+        for p in [sdf_path, pdbqt_path]:
+            if os.path.exists(p):
+                os.unlink(p)
+
+
+def _manual_ligand_pdbqt(mol) -> str:
+    """Manual ligand PDBQT with ROOT/ENDROOT for Vina compatibility."""
+    from rdkit import Chem
+    conf = mol.GetConformer()
+    lines = ["ROOT"]
+    for i, atom in enumerate(mol.GetAtoms()):
+        pos = conf.GetAtomPosition(i)
+        sym = atom.GetSymbol().upper()
+        # AD4 atom types for ligands
+        if sym == 'C':
+            ad = 'A' if atom.GetIsAromatic() else 'C'
+        elif sym == 'N':
+            ad = 'NA' if atom.GetTotalNumHs() == 0 else 'N'
+        elif sym == 'O':
+            ad = 'OA'
+        elif sym == 'S':
+            ad = 'SA'
+        elif sym == 'H':
+            # Check if bonded to N or O
+            neighbors = [n.GetSymbol() for n in atom.GetNeighbors()]
+            ad = 'HD' if any(n in ('N', 'O') for n in neighbors) else 'H'
+        elif sym == 'F':
+            ad = 'F'
+        elif sym == 'CL':
+            ad = 'Cl'
+        elif sym == 'BR':
+            ad = 'Br'
+        else:
+            ad = 'C'
+        lines.append(
+            f"HETATM{i+1:5d} {sym:<4s} LIG A   1    "
+            f"{pos.x:8.3f}{pos.y:8.3f}{pos.z:8.3f}  1.00  0.00    "
+            f"+0.000 {ad:>2s}"
+        )
+    lines.append("ENDROOT")
+    lines.append("END")
+    return "\n".join(lines)
+
+
+def _coords_to_pdbqt(coords, mol=None):
+    """Convert coordinates to PDBQT. Uses meeko/obabel if mol provided."""
+    if mol is not None:
+        try:
+            return _mol_to_pdbqt(mol)
+        except Exception:
+            pass
+    # Bare fallback (all carbon, for testing only)
+    lines = ["ROOT"]
     for i, (x, y, z) in enumerate(coords):
         lines.append(
-            f"ATOM  {i+1:5d}  C   LIG A   1    "
+            f"HETATM{i+1:5d}  C   LIG A   1    "
             f"{x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00    +0.000  C"
         )
+    lines.append("ENDROOT")
     lines.append("END")
     return "\n".join(lines)
 
