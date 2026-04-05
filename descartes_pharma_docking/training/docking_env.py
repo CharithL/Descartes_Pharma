@@ -322,8 +322,8 @@ class DockingEnv:
         return 50.0  # Not found
 
     def _random_initial_pose(self, ligand) -> np.ndarray:
-        """Place ligand randomly near the pocket center."""
-        offset = np.random.randn(3) * 3.0  # 3A random offset
+        """Place ligand randomly near the pocket center, ensuring all atoms
+        stay within the Vina grid box."""
         pocket_center = (
             self.pocket.pocket_center
             if hasattr(self.pocket, "pocket_center")
@@ -333,7 +333,6 @@ class DockingEnv:
         if hasattr(ligand, "conformer_coords") and ligand.conformer_coords is not None:
             coords = ligand.conformer_coords
         else:
-            # Fallback: generate a simple placeholder
             n_atoms = (
                 ligand.mol.GetNumAtoms()
                 if hasattr(ligand, "mol") and ligand.mol is not None
@@ -347,6 +346,22 @@ class DockingEnv:
             else coords.mean(axis=0)
         )
         centered = coords - center_of_mass
+
+        # Compute ligand radius (max atom distance from center)
+        ligand_radius = float(np.max(np.linalg.norm(centered, axis=1)))
+
+        # Get grid box half-size (from world model if available)
+        box_half = 15.0
+        if hasattr(self, 'wm') and hasattr(self.wm, 'box_size'):
+            box_half = float(self.wm.box_size[0]) / 2.0
+
+        # Max safe offset: box_half - ligand_radius - safety_margin
+        max_offset = max(0.5, box_half - ligand_radius - 3.0)
+
+        # Random offset clamped to safe range
+        offset = np.random.randn(3) * min(2.0, max_offset)
+        offset = np.clip(offset, -max_offset, max_offset)
+
         return centered + pocket_center + offset
 
     def _apply_action(self, action: int) -> np.ndarray:

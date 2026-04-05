@@ -52,6 +52,7 @@ class VinaScore:
     steric_clash_count: int = 0
     dist_asp32: float = 0.0
     dist_asp228: float = 0.0
+    is_penalty: bool = False  # True if score is a penalty (ligand out of bounds)
 
 
 class VinaWorldModel:
@@ -144,7 +145,17 @@ class VinaWorldModel:
 
         try:
             self.v.set_ligand_from_file(tmp_path)
-            energy = self.v.score()
+            try:
+                energy = self.v.score()
+            except RuntimeError as e:
+                if "outside the grid box" in str(e):
+                    logger.debug("Ligand outside grid box — returning penalty score")
+                    self.n_evaluations += 1
+                    return VinaScore(
+                        total_energy=100.0, inter_energy=100.0,
+                        intra_energy=0.0, is_penalty=True,
+                    )
+                raise
             self.n_evaluations += 1
 
             return VinaScore(
@@ -152,6 +163,15 @@ class VinaWorldModel:
                 inter_energy=energy[1] if len(energy) > 1 else energy[0],
                 intra_energy=energy[2] if len(energy) > 2 else 0.0,
             )
+        except (TypeError, RuntimeError) as e:
+            if "PDBQT parsing error" in str(e) or "outside the grid box" in str(e):
+                logger.debug(f"Vina scoring error: {e} — returning penalty")
+                self.n_evaluations += 1
+                return VinaScore(
+                    total_energy=100.0, inter_energy=100.0,
+                    intra_energy=0.0, is_penalty=True,
+                )
+            raise
         finally:
             os.unlink(tmp_path)
 
