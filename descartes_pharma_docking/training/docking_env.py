@@ -429,16 +429,102 @@ class DockingEnv:
         return new_coords
 
     def _coords_to_pdbqt(self, coords: np.ndarray) -> str:
-        """Convert numpy coordinates to PDBQT string for Vina."""
-        lines = ["MODEL 1"]
+        """Convert numpy coordinates to PDBQT string for Vina.
+
+        Uses meeko if the ligand has an RDKit mol, otherwise manual
+        HETATM + ROOT/ENDROOT format. Never writes MODEL/ENDMDL tags.
+        """
+        # Try meeko with actual mol object for correct atom types
+        if hasattr(self, 'current_ligand') and hasattr(self.current_ligand, 'mol'):
+            mol = self.current_ligand.mol
+            if mol is not None:
+                try:
+                    return self._mol_coords_to_pdbqt(mol, coords)
+                except Exception:
+                    pass
+
+        # Manual fallback: HETATM + ROOT/ENDROOT (no MODEL tags)
+        lines = ["ROOT"]
         for i, (x, y, z) in enumerate(coords):
-            atom_name = "C" if i < len(coords) else "H"
             lines.append(
-                f"ATOM  {i+1:5d} {atom_name:4s} LIG A   1    "
-                f"{x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00    0.000 {atom_name}"
+                f"HETATM{i+1:5d}  C   LIG A   1    "
+                f"{x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00    +0.000  C"
             )
-        lines.append("ENDMDL")
+        lines.append("ENDROOT")
+        lines.append("END")
         return "\n".join(lines)
+
+    def _mol_coords_to_pdbqt(self, mol, coords: np.ndarray) -> str:
+        """Convert RDKit mol with updated coords to single-model PDBQT."""
+        from rdkit import Chem
+        from rdkit.Geometry import Point3D
+
+        mol = Chem.RWMol(mol)
+        if mol.GetNumConformers() == 0:
+            from rdkit.Chem import AllChem
+            AllChem.EmbedMolecule(mol, AllChem.ETKDGv3())
+
+        conf = mol.GetConformer()
+        n_atoms = min(len(coords), mol.GetNumAtoms())
+        for i in range(n_atoms):
+            conf.SetAtomPosition(i, Point3D(
+                float(coords[i][0]), float(coords[i][1]), float(coords[i][2])))
+
+        # Try meeko
+        try:
+            from meeko import MoleculePreparation, PDBQTWriterLegacy
+            preparator = MoleculePreparation()
+            mol_setups = preparator.prepare(mol)
+            pdbqt_string, is_ok, err = PDBQTWriterLegacy.write_string(mol_setups[0])
+            if is_ok:
+                # Strip MODEL/ENDMDL tags
+                lines = [l for l in pdbqt_string.split('\n')
+                         if not l.startswith('MODEL') and not l.startswith('ENDMDL')]
+                return '\n'.join(lines)
+        except Exception:
+            pass
+
+        # Try obabel
+        try:
+            import tempfile, subprocess, os
+            sdf_path = tempfile.mktemp(suffix='.sdf')
+            pdbqt_path = tempfile.mktemp(suffix='.pdbqt')
+            writer = Chem.SDWriter(sdf_path)
+            writer.write(mol)
+            writer.close()
+            result = subprocess.run(
+                ['obabel', sdf_path, '-O', pdbqt_path, '-p', '7.4'],
+                capture_output=True, text=True, timeout=30)
+            if result.returncode == 0 and os.path.exists(pdbqt_path):
+                with open(pdbqt_path) as f:
+                    content = f.read()
+                lines = [l for l in content.split('\n')
+                         if not l.startswith('MODEL') and not l.startswith('ENDMDL')]
+                return '\n'.join(lines)
+        except Exception:
+            pass
+        finally:
+            for p in [sdf_path, pdbqt_path]:
+                try:
+                    os.unlink(p)
+                except Exception:
+                    pass
+
+        # Last resort: manual with proper atom types
+        lines = ["ROOT"]
+        for i in range(n_atoms):
+            atom = mol.GetAtomWithIdx(i)
+            sym = atom.GetSymbol()
+            x, y, z = coords[i]
+            ad = 'A' if atom.GetIsAromatic() and sym == 'C' else (
+                 'OA' if sym == 'O' else ('NA' if sym == 'N' and atom.GetTotalNumHs() == 0 else (
+                 'N' if sym == 'N' else ('SA' if sym == 'S' else 'C'))))
+            lines.append(
+                f"HETATM{i+1:5d} {sym:<4s} LIG A   1    "
+                f"{x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00    +0.000 {ad:>2s}")
+        lines.append("ENDROOT")
+        lines.append("END")
+        return '\n'.join(lines)
 
     def get_trajectory(self) -> list:
         """Get the full trajectory for this episode (for probing)."""
