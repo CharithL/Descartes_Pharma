@@ -89,11 +89,19 @@ class VinaWorldModel:
         self._receptor_path = receptor_pdbqt_path
 
         if _VINA_AVAILABLE:
-            self.v = Vina(sf_name='vina')
-            self.v.set_receptor(receptor_pdbqt_path)
-            self.v.compute_vina_maps(center=list(center),
-                                     box_size=list(box_size))
-            self._fallback = False
+            try:
+                self.v = Vina(sf_name='vina')
+                self.v.set_receptor(receptor_pdbqt_path)
+                self.v.compute_vina_maps(center=list(center),
+                                         box_size=list(box_size))
+                self._fallback = False
+            except Exception as e:
+                logger.warning(f"Vina receptor setup failed: {e}. Using fallback scorer.")
+                self.v = None
+                self._fallback = True
+                self._fallback_model = FallbackVinaModel(
+                    receptor_pdbqt_path, center, box_size
+                )
         else:
             self.v = None
             self._fallback = True

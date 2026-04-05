@@ -200,7 +200,7 @@ def _convert_with_openbabel(pdb_path: str, output_path: str) -> bool:
 # AutoDock atom type mapping for common protein atoms
 _AD_ATOM_TYPES = {
     "C": "C",
-    "N": "NA",  # Nitrogen acceptor
+    "N": "N",   # Nitrogen (backbone and non-acceptor)
     "O": "OA",  # Oxygen acceptor
     "S": "SA",  # Sulfur acceptor
     "H": "HD",  # Hydrogen donor (bonded to N/O)
@@ -215,6 +215,9 @@ _AD_ATOM_TYPES = {
     "CA": "Ca",
     "MN": "Mn",
 }
+
+# Nitrogen acceptor residues: sidechain N in these should be NA
+_N_ACCEPTOR_ATOMS = {"ND1", "NE2", "OD1", "OD2", "OE1", "OE2"}
 
 
 def _convert_fallback(pdb_path: str, output_path: str) -> None:
@@ -243,7 +246,11 @@ def _convert_fallback(pdb_path: str, output_path: str) -> None:
                     element = atom_name[0] if atom_name else "C"
 
                 # Map to AutoDock atom type
+                atom_name = line[12:16].strip()
                 ad_type = _AD_ATOM_TYPES.get(element, "C")
+                # Sidechain acceptor nitrogens get NA type
+                if element == "N" and atom_name in _N_ACCEPTOR_ATOMS:
+                    ad_type = "NA"
 
                 # Assign a dummy partial charge (0.000)
                 charge = 0.000

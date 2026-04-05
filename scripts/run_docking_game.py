@@ -219,6 +219,7 @@ def run_phase1():
                 pdb_id="4IVT",
                 pdb_dir=str(STRUCTURES_DIR),
                 prepared_dir=str(PREPARED_DIR),
+                force_download=True,  # Regenerate to pick up atom type fixes
             )
             print(f"    Receptor PDBQT: {pdbqt_path}")
         except Exception as e:
@@ -1185,12 +1186,21 @@ def _create_fallback_ligand(smiles: str):
 
 
 def _create_fallback_scorer(pdbqt_path: str):
-    """Create a FallbackVinaModel (always available)."""
-    return VinaWorldModel(
-        receptor_pdbqt_path=pdbqt_path,
-        center=(28.0, 15.0, 22.0),
-        box_size=(25.0, 25.0, 25.0),
-    )
+    """Create a scorer — VinaWorldModel with automatic fallback on error."""
+    from descartes_pharma_docking.vina_engine.vina_scorer import FallbackVinaModel
+    try:
+        model = VinaWorldModel(
+            receptor_pdbqt_path=pdbqt_path,
+            center=(28.0, 15.0, 22.0),
+            box_size=(25.0, 25.0, 25.0),
+        )
+        return model
+    except Exception:
+        return FallbackVinaModel(
+            receptor_pdbqt_path=pdbqt_path,
+            center=(28.0, 15.0, 22.0),
+            box_size=(25.0, 25.0, 25.0),
+        )
 
 
 def _coords_to_pdbqt(coords: np.ndarray) -> str:
