@@ -245,11 +245,20 @@ def run_phase1():
             pocket = parse_pocket(
                 pdb_path=pdb_path,
                 pocket_center=BACE1_POCKET_CENTER,
-                pocket_radius=BACE1_POCKET_RADIUS,
+                pocket_radius=max(BACE1_POCKET_RADIUS, 15.0),  # Ensure large enough
                 catalytic_residue_ids={32, 228},
                 pdb_id="4IVT",
             )
             print(f"    Pocket parsed: {len(pocket.residues)} residues")
+            print(f"    Catalytic residues found: {len(pocket.catalytic_residues)}")
+            for cr in pocket.catalytic_residues:
+                print(f"      {cr.name} (resid={cr.resid}) center={cr.center.round(1)}")
+            # List all ASP residues for debugging
+            asp_residues = [r for r in pocket.residues if r.resname == "ASP"]
+            if not pocket.catalytic_residues and asp_residues:
+                print(f"    WARNING: 0 catalytic but found {len(asp_residues)} ASP residues:")
+                for ar in asp_residues:
+                    print(f"      {ar.name} resid={ar.resid}")
         except Exception as e:
             logger.warning(f"    Pocket parsing failed: {e}")
 

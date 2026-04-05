@@ -55,9 +55,10 @@ BACE1_SUB_POCKETS: Dict[str, Dict] = {
     },
 }
 
-# Default pocket center: midpoint between Asp32 and Asp228 catalytic dyad
-BACE1_POCKET_CENTER = (28.0, 15.0, 22.0)
-BACE1_POCKET_RADIUS = 12.0
+# Default pocket center: midpoint of Asp32-OD1 (11.9, 14.9, 20.4) and
+# Asp228-OD1 (20.0, 26.8, 6.7) from PDB 4IVT crystal structure
+BACE1_POCKET_CENTER = (16.0, 20.9, 13.5)
+BACE1_POCKET_RADIUS = 15.0  # 15A ensures both catalytic ASPs are captured
 
 
 def assign_residues_to_sub_pockets(

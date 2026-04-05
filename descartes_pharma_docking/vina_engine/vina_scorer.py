@@ -70,9 +70,10 @@ class VinaWorldModel:
     """
 
     def __init__(self, receptor_pdbqt_path: str,
-                 center: tuple = (28.0, 15.0, 22.0),
+                 center: tuple = (16.0, 20.9, 13.5),
                  box_size: tuple = (25.0, 25.0, 25.0),
-                 exhaustiveness: int = 8):
+                 exhaustiveness: int = 8,
+                 allow_fallback: bool = True):
         """
         Initialize Vina with receptor structure.
 
@@ -81,6 +82,7 @@ class VinaWorldModel:
             center: (x, y, z) center of search box
             box_size: (sx, sy, sz) dimensions of search box in Angstroms
             exhaustiveness: Search thoroughness (higher = slower + better)
+            allow_fallback: If False, raise error when Vina fails (no silent fallback)
         """
         self.center = np.array(center)
         self.box_size = np.array(box_size)
@@ -95,7 +97,13 @@ class VinaWorldModel:
                 self.v.compute_vina_maps(center=list(center),
                                          box_size=list(box_size))
                 self._fallback = False
+                logger.info("Vina loaded successfully with real physics scoring")
             except Exception as e:
+                if not allow_fallback:
+                    raise RuntimeError(
+                        f"Vina failed to load receptor and allow_fallback=False. "
+                        f"Fix the PDBQT file or install Open Babel. Error: {e}"
+                    )
                 logger.warning(f"Vina receptor setup failed: {e}. Using fallback scorer.")
                 self.v = None
                 self._fallback = True
@@ -103,6 +111,11 @@ class VinaWorldModel:
                     receptor_pdbqt_path, center, box_size
                 )
         else:
+            if not allow_fallback:
+                raise RuntimeError(
+                    "Vina not installed and allow_fallback=False. "
+                    "Install: pip install vina"
+                )
             self.v = None
             self._fallback = True
             self._fallback_model = FallbackVinaModel(

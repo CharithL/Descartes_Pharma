@@ -197,101 +197,135 @@ def _convert_with_openbabel(pdb_path: str, output_path: str) -> bool:
         return False
 
 
-# AutoDock atom type mapping for common protein atoms
-_AD_ATOM_TYPES = {
-    "C": "C",
-    "N": "N",   # Nitrogen (backbone and non-acceptor)
-    "O": "OA",  # Oxygen acceptor
-    "S": "SA",  # Sulfur acceptor
-    "H": "HD",  # Hydrogen donor (bonded to N/O)
-    "F": "F",
-    "P": "P",
-    "CL": "Cl",
-    "BR": "Br",
-    "I": "I",
-    "FE": "Fe",
-    "ZN": "Zn",
-    "MG": "Mg",
-    "CA": "Ca",
-    "MN": "Mn",
-}
+def _get_ad4_atom_type(element: str, atom_name: str, resname: str) -> str:
+    """
+    Assign AutoDock4 atom type based on element, atom name, and residue.
 
-# Nitrogen acceptor residues: sidechain N in these should be NA
-_N_ACCEPTOR_ATOMS = {"ND1", "NE2", "OD1", "OD2", "OE1", "OE2"}
+    AD4 types used by Vina:
+      C  - aliphatic carbon
+      A  - aromatic carbon
+      N  - nitrogen (non-acceptor: backbone N, Lys NZ, Arg NH1/NH2)
+      NA - nitrogen acceptor (His ND1/NE2, Asn/Gln sidechain N)
+      OA - oxygen acceptor (all O atoms)
+      SA - sulfur acceptor
+      HD - polar hydrogen (on N-H or O-H)
+      H  - non-polar hydrogen
+    """
+    element = element.upper().strip()
+
+    if element == "C":
+        # Aromatic carbons in aromatic residues
+        aromatic_res = {"PHE", "TYR", "TRP", "HIS"}
+        aromatic_atoms = {"CG", "CD1", "CD2", "CE1", "CE2", "CZ", "CH2",
+                          "CE3", "CZ2", "CZ3"}
+        if resname in aromatic_res and atom_name in aromatic_atoms:
+            return "A"
+        return "C"
+    elif element == "N":
+        # Backbone N and donor N: type N
+        # Acceptor N (His ND1/NE2): type NA
+        acceptor_n = {"ND1", "NE2"}
+        if atom_name in acceptor_n:
+            return "NA"
+        return "N"
+    elif element == "O":
+        return "OA"
+    elif element == "S":
+        return "SA"
+    elif element == "H":
+        return "HD"  # Simplified: all H as HD
+    elif element == "P":
+        return "P"
+    elif element in ("F", "CL", "BR", "I"):
+        return {"F": "F", "CL": "Cl", "BR": "Br", "I": "I"}[element]
+    elif element in ("FE", "ZN", "MG", "CA", "MN"):
+        return {"FE": "Fe", "ZN": "Zn", "MG": "Mg", "CA": "Ca", "MN": "Mn"}[element]
+    else:
+        return "C"
 
 
 def _convert_fallback(pdb_path: str, output_path: str) -> None:
     """
-    Simple PDB to PDBQT converter that adds dummy partial charges
-    and AutoDock atom types.
+    PDB to PDBQT converter with correct AutoDock4 atom types.
 
-    This is a minimal fallback for development. For production, use
-    Open Babel, MGLTools prepare_receptor4.py, or ADFR Suite.
+    PDBQT format (columns, 1-indexed):
+      1-6:   Record type (ATOM/HETATM)
+      7-11:  Atom serial
+      13-16: Atom name
+      17:    Alt location
+      18-20: Residue name
+      22:    Chain ID
+      23-26: Residue sequence number
+      31-38: X coordinate
+      39-46: Y coordinate
+      47-54: Z coordinate
+      55-60: Occupancy
+      61-66: B-factor
+      67-76: Blank
+      77-78: Charge (as string +0.000 format, right-justified in cols 69-76)
+      79-80: AD4 atom type (right-justified)
+
+    Vina is strict about column alignment. The charge field is cols 71-76
+    and the atom type is cols 77-78.
     """
     logger.warning(
-        "Using fallback PDB->PDBQT converter. For production, install "
-        "Open Babel: conda install -c conda-forge openbabel"
+        "Using fallback PDB->PDBQT converter. For better results, install "
+        "Open Babel: apt-get install -y openbabel"
     )
 
     lines_out = []
 
     with open(pdb_path, 'r') as f:
         for line in f:
-            if line.startswith("ATOM") or line.startswith("HETATM"):
-                # Parse element from columns 77-78 (right-justified)
-                element = line[76:78].strip().upper() if len(line) > 76 else ""
-                if not element:
-                    # Fallback: derive from atom name (columns 13-16)
-                    atom_name = line[12:16].strip()
-                    element = atom_name[0] if atom_name else "C"
+            if not (line.startswith("ATOM") or line.startswith("HETATM")):
+                if line.startswith("END") or line.startswith("TER"):
+                    lines_out.append(line.rstrip())
+                continue
 
-                # Map to AutoDock atom type
-                atom_name = line[12:16].strip()
-                ad_type = _AD_ATOM_TYPES.get(element, "C")
-                # Sidechain acceptor nitrogens get NA type
-                if element == "N" and atom_name in _N_ACCEPTOR_ATOMS:
-                    ad_type = "NA"
+            # Parse atom name and residue name
+            atom_name = line[12:16].strip()
+            resname = line[17:20].strip()
 
-                # Assign a dummy partial charge (0.000)
-                charge = 0.000
+            # Parse element from columns 77-78 (standard PDB)
+            element = line[76:78].strip().upper() if len(line) > 76 else ""
+            if not element:
+                # Derive from atom name (first non-digit character)
+                for ch in atom_name:
+                    if ch.isalpha():
+                        element = ch
+                        break
+                else:
+                    element = "C"
 
-                # Build PDBQT line: PDB line (up to col 54) + occupancy +
-                # B-factor + charge + atom type
-                # PDBQT format: columns 1-54 same as PDB, then
-                # 55-60 occupancy, 61-66 B-factor, 67-76 charge, 77-78 type
-                pdb_line = line.rstrip()
+            # Get correct AD4 type
+            ad_type = _get_ad4_atom_type(element, atom_name, resname)
 
-                # Ensure line is at least 54 chars
-                pdb_line = pdb_line.ljust(54)
+            # Parse occupancy and B-factor
+            try:
+                occupancy = float(line[54:60])
+            except (ValueError, IndexError):
+                occupancy = 1.00
+            try:
+                bfactor = float(line[60:66])
+            except (ValueError, IndexError):
+                bfactor = 0.00
 
-                # Take first 54 chars, add occupancy/B-factor from original
-                # or defaults
-                try:
-                    occupancy = float(line[54:60])
-                except (ValueError, IndexError):
-                    occupancy = 1.00
-                try:
-                    bfactor = float(line[60:66])
-                except (ValueError, IndexError):
-                    bfactor = 0.00
-
-                pdbqt_line = (
-                    f"{pdb_line[:54]}"
-                    f"{occupancy:6.2f}"
-                    f"{bfactor:6.2f}"
-                    f"    {charge:+8.3f} "
-                    f"{ad_type:<2s}"
-                )
-                lines_out.append(pdbqt_line)
-
-            elif line.startswith("END") or line.startswith("TER"):
-                lines_out.append(line.rstrip())
+            # Build PDBQT line with correct column alignment
+            # Cols 1-54: same as PDB (record, serial, name, alt, resname, chain, resid, coords)
+            # Cols 55-60: occupancy
+            # Cols 61-66: B-factor
+            # Cols 67-76: partial charge (right-justified, format +0.000)
+            # Cols 77-78: AD4 atom type (right-justified)
+            base = line[:54].rstrip().ljust(54)
+            charge = 0.000
+            pdbqt_line = f"{base}{occupancy:6.2f}{bfactor:6.2f}    {charge:+6.3f} {ad_type:>2s}"
+            lines_out.append(pdbqt_line)
 
     with open(output_path, 'w') as f:
         for line in lines_out:
             f.write(line + '\n')
 
-    logger.info(f"Fallback PDBQT written to {output_path}")
+    logger.info(f"Fallback PDBQT written to {output_path} ({len(lines_out)} atom lines)")
 
 
 def prepare_receptor(pdb_id: str = PDB_ID,
