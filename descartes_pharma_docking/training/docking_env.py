@@ -326,24 +326,62 @@ class DockingEnv:
         Get a physically realistic starting pose using Vina docking.
 
         Strategy: let Vina do a quick search (exhaustiveness=4, ~5-10 sec)
-        to find a plausible pose, then the RL agent refines it. This avoids
-        starting inside the protein backbone (which gives +150 kcal/mol clashes).
+        to find a plausible pose, then the RL agent refines it.
         """
-        # Try Vina docking for a realistic starting pose
-        try:
-            pdbqt_str = self._coords_to_pdbqt(
-                ligand.conformer_coords if hasattr(ligand, 'conformer_coords')
-                else np.random.randn(20, 3), ligand)
-            dock_results = self.wm.dock_ligand(pdbqt_str, n_poses=1, exhaustiveness=4)
-            if dock_results and dock_results[0].docked_coords is not None:
-                docked = dock_results[0].docked_coords
-                if dock_results[0].total_energy < 50.0:
-                    # Docked pose has reasonable energy — use it
-                    return docked
-        except Exception:
-            pass
+        print(f"    [INIT_POSE] Attempting Vina docking for initial pose...")
 
-        # Fallback: place ligand at pocket surface (not center)
+        try:
+            coords = (ligand.conformer_coords
+                      if hasattr(ligand, 'conformer_coords') and ligand.conformer_coords is not None
+                      else np.random.randn(20, 3))
+            mol = ligand.mol if hasattr(ligand, 'mol') else None
+            pdbqt_str = self._coords_to_pdbqt(coords, mol)
+            print(f"    [INIT_POSE] PDBQT generated, {len(pdbqt_str)} chars")
+
+            dock_results = self.wm.dock_ligand(pdbqt_str, n_poses=1, exhaustiveness=4)
+            print(f"    [INIT_POSE] dock_ligand returned {len(dock_results)} results")
+
+            if dock_results:
+                best = dock_results[0]
+                print(f"    [INIT_POSE] Best energy: {best.total_energy:.2f} kcal/mol")
+                has_coords = best.docked_coords is not None
+                print(f"    [INIT_POSE] Has docked_coords: {has_coords}")
+
+                if has_coords:
+                    dc = best.docked_coords
+                    print(f"    [INIT_POSE] Docked coords shape: {dc.shape}")
+                    print(f"    [INIT_POSE] Docked center: {dc.mean(axis=0).round(2)}")
+
+                    # Check atom count match
+                    n_orig = len(coords)
+                    n_dock = len(dc)
+                    print(f"    [INIT_POSE] Original atoms: {n_orig}, Docked atoms: {n_dock}")
+
+                    if n_dock == n_orig and best.total_energy < 50.0:
+                        print(f"    [INIT_POSE] SUCCESS — using Vina-docked pose")
+                        return dc
+                    elif n_dock != n_orig:
+                        print(f"    [INIT_POSE] ATOM COUNT MISMATCH — "
+                              f"cannot use docked coords directly")
+                        # Use docked center + original shape as fallback
+                        centered = coords - coords.mean(axis=0)
+                        docked_center = dc.mean(axis=0)
+                        print(f"    [INIT_POSE] Using docked CENTER with original shape")
+                        return centered + docked_center
+                    else:
+                        print(f"    [INIT_POSE] Energy too high ({best.total_energy:.1f}), "
+                              f"using docked center anyway")
+                        centered = coords - coords.mean(axis=0)
+                        return centered + dc.mean(axis=0)
+                else:
+                    print(f"    [INIT_POSE] No docked_coords — coords extraction failed")
+            else:
+                print(f"    [INIT_POSE] dock_ligand returned empty list!")
+
+        except Exception as e:
+            print(f"    [INIT_POSE] EXCEPTION: {type(e).__name__}: {e}")
+
+        print(f"    [INIT_POSE] FALLBACK: using offset placement")
         return self._safe_offset_pose(ligand)
 
     def _safe_offset_pose(self, ligand) -> np.ndarray:

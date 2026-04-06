@@ -444,8 +444,8 @@ def run_phase3(pocket, vina_model, train_ligands, val_ligands, pdbqt_path):
     """Train the SearchPolicyNetwork via REINFORCE with continuous Vina reward."""
     t0 = phase_header(3, "TRAINING")
 
-    N_EPISODES = 300   # Reduced: each episode starts from docked pose (~10s dock overhead)
-    MAX_STEPS = 50     # Increased: more refinement steps from better starting pose
+    N_EPISODES = 5     # DEBUG: reduced to 5 to diagnose initial pose placement
+    MAX_STEPS = 10     # DEBUG: reduced steps for faster iteration
     LOG_INTERVAL = 50
     SAVE_INTERVAL = 100
 
@@ -460,6 +460,41 @@ def run_phase3(pocket, vina_model, train_ligands, val_ligands, pdbqt_path):
         score_history_len=10,
     )
     print(f"    Env ready. Pocket vector dim: {len(env.pocket_vec)}")
+
+    # ------------------------------------------------------------------
+    # 3a.1 DEBUG: Test dock_ligand in isolation
+    # ------------------------------------------------------------------
+    print(f"\n  [DEBUG] Testing dock_ligand on first training molecule...")
+    try:
+        test_lig = train_ligands[0]
+        test_pdbqt = env._coords_to_pdbqt(
+            test_lig.conformer_coords if hasattr(test_lig, 'conformer_coords')
+            else np.random.randn(20, 3),
+            test_lig.mol if hasattr(test_lig, 'mol') else None)
+        print(f"  [DEBUG] PDBQT length: {len(test_pdbqt)} chars")
+        pdbqt_lines = test_pdbqt.split('\n')
+        print(f"  [DEBUG] First 3 lines:")
+        for line in pdbqt_lines[:3]:
+            print(f"    {line}")
+
+        dock_results = vina_model.dock_ligand(test_pdbqt, n_poses=1, exhaustiveness=4)
+        print(f"  [DEBUG] dock_ligand returned {len(dock_results)} results")
+        if dock_results:
+            r = dock_results[0]
+            print(f"  [DEBUG] Energy: {r.total_energy:.2f} kcal/mol")
+            print(f"  [DEBUG] Has docked_coords: {r.docked_coords is not None}")
+            if r.docked_coords is not None:
+                print(f"  [DEBUG] Coords shape: {r.docked_coords.shape}")
+                print(f"  [DEBUG] Coords center: {r.docked_coords.mean(axis=0).round(2)}")
+            else:
+                print(f"  [DEBUG] WARNING: docked_coords is None!")
+        else:
+            print(f"  [DEBUG] WARNING: dock_ligand returned empty list!")
+    except Exception as e:
+        print(f"  [DEBUG] dock_ligand FAILED: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
+    print()
 
     # ------------------------------------------------------------------
     # 3b. Initialize SearchPolicyNetwork
