@@ -334,8 +334,8 @@ class DockingEnv:
             coords = (ligand.conformer_coords
                       if hasattr(ligand, 'conformer_coords') and ligand.conformer_coords is not None
                       else np.random.randn(20, 3))
-            mol = ligand.mol if hasattr(ligand, 'mol') else None
-            pdbqt_str = self._coords_to_pdbqt(coords, mol)
+            self.current_ligand = ligand  # Set so _coords_to_pdbqt can access mol
+            pdbqt_str = self._coords_to_pdbqt(coords)
             print(f"    [INIT_POSE] PDBQT generated, {len(pdbqt_str)} chars")
 
             dock_results = self.wm.dock_ligand(pdbqt_str, n_poses=1, exhaustiveness=4)
