@@ -324,16 +324,29 @@ def run_phase1():
         vina_model = VinaWorldModel(
             receptor_pdbqt_path=pdbqt_path,
             center=actual_pocket_center,
-            box_size=(30.0, 30.0, 30.0),  # Larger box for 108-residue pocket
+            box_size=(30.0, 30.0, 30.0),
         )
-        # Translate ligand to pocket center before scoring
+        # Use Vina DOCKING (not just scoring) for realistic test score
         lig = test_ligands[0]
         centered_mol = _center_mol_on_pocket(lig.mol, actual_pocket_center)
         pdbqt_str = _mol_to_pdbqt(centered_mol)
-        result = vina_model.score_pose(pdbqt_str)
-        test_score = result.total_energy
-        print(f"    Vina test score: {test_score:.3f} kcal/mol "
-              f"(fallback={vina_model._fallback})")
+
+        print(f"    Running Vina docking on test molecule (exhaustiveness=4)...")
+        dock_results = vina_model.dock_ligand(pdbqt_str, n_poses=1, exhaustiveness=4)
+        if dock_results:
+            test_score = dock_results[0].total_energy
+            has_coords = dock_results[0].docked_coords is not None
+            print(f"    Vina DOCKED score: {test_score:.3f} kcal/mol "
+                  f"(coords={'yes' if has_coords else 'no'}, fallback={vina_model._fallback})")
+            if test_score > 0:
+                print(f"    Note: positive score may indicate poor initial pose or large molecule.")
+        else:
+            # Fallback to single-pose scoring
+            result = vina_model.score_pose(pdbqt_str)
+            test_score = result.total_energy
+            print(f"    Vina score (no dock): {test_score:.3f} kcal/mol "
+                  f"(fallback={vina_model._fallback})")
+            print(f"    Note: high positive score expected for random pose (steric clashes).")
     except Exception as e:
         logger.warning(f"    Vina scoring failed: {e}. Using simple scorer.")
         vina_model = _create_fallback_scorer(pdbqt_path)
@@ -431,8 +444,8 @@ def run_phase3(pocket, vina_model, train_ligands, val_ligands, pdbqt_path):
     """Train the SearchPolicyNetwork via REINFORCE with continuous Vina reward."""
     t0 = phase_header(3, "TRAINING")
 
-    N_EPISODES = 500
-    MAX_STEPS = 30
+    N_EPISODES = 300   # Reduced: each episode starts from docked pose (~10s dock overhead)
+    MAX_STEPS = 50     # Increased: more refinement steps from better starting pose
     LOG_INTERVAL = 50
     SAVE_INTERVAL = 100
 

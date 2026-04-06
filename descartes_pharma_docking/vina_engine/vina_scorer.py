@@ -53,6 +53,7 @@ class VinaScore:
     dist_asp32: float = 0.0
     dist_asp228: float = 0.0
     is_penalty: bool = False  # True if score is a penalty (ligand out of bounds)
+    docked_coords: object = None  # np.ndarray of docked pose coordinates (if available)
 
 
 class VinaWorldModel:
@@ -176,37 +177,85 @@ class VinaWorldModel:
             os.unlink(tmp_path)
 
     def dock_ligand(self, ligand_pdbqt: str,
-                     n_poses: int = 10) -> List[VinaScore]:
+                     n_poses: int = 3,
+                     exhaustiveness: int = 4) -> List[VinaScore]:
         """
-        Full docking search -- let Vina find the best poses.
+        Run Vina docking search to find best poses automatically.
 
-        This is like letting the chess engine find the best move itself.
-        Used for baseline comparison (can the RL agent match Vina's search?).
+        Uses Vina's genetic algorithm + local optimization. More expensive
+        than single-pose scoring (~5-10 sec) but gives physically realistic
+        starting points for RL refinement.
         """
         if self._fallback:
-            # Fallback returns a single score
             return [self._fallback_model.score_pose(ligand_pdbqt)]
 
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.pdbqt',
-                                          delete=False) as f:
-            f.write(ligand_pdbqt)
-            tmp_path = f.name
+        tmp_ligand = tempfile.mktemp(suffix='.pdbqt')
+        tmp_output = tempfile.mktemp(suffix='_docked.pdbqt')
 
         try:
-            self.v.set_ligand_from_file(tmp_path)
-            self.v.dock(exhaustiveness=self.exhaustiveness, n_poses=n_poses)
+            with open(tmp_ligand, 'w') as f:
+                f.write(ligand_pdbqt)
+
+            self.v.set_ligand_from_file(tmp_ligand)
+            self.v.dock(exhaustiveness=exhaustiveness, n_poses=n_poses)
+
             energies = self.v.energies(n_poses=n_poses)
+
+            # Write docked poses so we can extract coordinates
+            self.v.write_poses(tmp_output, n_poses=n_poses)
+            coords_list = self._parse_docked_pdbqt(tmp_output)
 
             results = []
             for i, e in enumerate(energies):
-                results.append(VinaScore(
+                score = VinaScore(
                     total_energy=e[0],
                     inter_energy=e[1] if len(e) > 1 else e[0],
                     intra_energy=e[2] if len(e) > 2 else 0.0,
-                ))
+                )
+                if i < len(coords_list):
+                    score.docked_coords = coords_list[i]
+                results.append(score)
+
+            self.n_evaluations += 1
             return results
+
+        except (TypeError, RuntimeError) as e:
+            logger.debug(f"Docking failed: {e}")
+            return []
         finally:
-            os.unlink(tmp_path)
+            for p in [tmp_ligand, tmp_output]:
+                if os.path.exists(p):
+                    os.unlink(p)
+
+    def _parse_docked_pdbqt(self, pdbqt_path: str) -> list:
+        """Parse multiple models from a docked PDBQT file."""
+        coords_per_model = []
+        current_coords = []
+
+        if not os.path.exists(pdbqt_path):
+            return coords_per_model
+
+        with open(pdbqt_path) as f:
+            for line in f:
+                if line.startswith('MODEL'):
+                    current_coords = []
+                elif line.startswith('ENDMDL'):
+                    if current_coords:
+                        coords_per_model.append(np.array(current_coords))
+                    current_coords = []
+                elif line.startswith(('ATOM', 'HETATM')):
+                    try:
+                        x = float(line[30:38])
+                        y = float(line[38:46])
+                        z = float(line[46:54])
+                        current_coords.append([x, y, z])
+                    except (ValueError, IndexError):
+                        pass
+
+        if current_coords and not coords_per_model:
+            coords_per_model.append(np.array(current_coords))
+
+        return coords_per_model
 
     def get_evaluation_count(self) -> int:
         """How many poses have been evaluated (for logging)."""
