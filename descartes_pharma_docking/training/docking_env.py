@@ -321,67 +321,116 @@ class DockingEnv:
                     return float(np.linalg.norm(ligand_center - np.asarray(center)))
         return 50.0  # Not found
 
-    def _get_initial_pose(self, ligand) -> np.ndarray:
-        """
-        Get a physically realistic starting pose using Vina docking.
+    def _docked_coords_from_meeko(self, docked_pdbqt, mol):
+        """C1: reconstruct full-atom docked coords in ORIGINAL atom order using
+        meeko (which embeds the atom mapping in the PDBQT). Returns (n_atoms, 3)
+        or None on any failure."""
+        try:
+            from rdkit import Chem
+            from meeko import PDBQTMolecule, RDKitMolCreate
+            try:
+                pmol = PDBQTMolecule(docked_pdbqt, is_dlg=False, skip_typing=True)
+            except TypeError:
+                pmol = PDBQTMolecule(docked_pdbqt)
+            rdmols = RDKitMolCreate.from_pdbqt_mol(pmol)
+            if not rdmols or rdmols[0] is None:
+                return None
+            rdmol = rdmols[0]
+            if rdmol.GetNumConformers() == 0:
+                return None
+            if rdmol.GetNumAtoms() < mol.GetNumAtoms():
+                rdmol = Chem.AddHs(rdmol, addCoords=True)
+            return rdmol.GetConformer().GetPositions()
+        except Exception as e:
+            print(f"    [INIT_POSE] meeko reconstruction failed: "
+                  f"{type(e).__name__}: {e}")
+            return None
 
-        Strategy: let Vina do a quick search (exhaustiveness=4, ~5-10 sec)
-        to find a plausible pose, then the RL agent refines it.
+    def _apply_docked_pose_to_mol(self, mol, docked_heavy_coords):
+        """C1: place real docked HEAVY-atom coords onto the ligand's heavy atoms
+        (assumes meeko preserved heavy-atom order) and re-place hydrogens from
+        that geometry. Returns full-atom coords, or None if counts mismatch."""
+        try:
+            from rdkit import Chem
+            from rdkit.Geometry import Point3D
+            heavy = np.asarray(docked_heavy_coords)
+            mol_noH = Chem.RemoveHs(Chem.Mol(mol))
+            heavy_idx = [a.GetIdx() for a in mol_noH.GetAtoms()
+                         if a.GetSymbol() != 'H']
+            if len(heavy_idx) != len(heavy):
+                return None
+            if mol_noH.GetNumConformers() == 0:
+                conf = Chem.Conformer(mol_noH.GetNumAtoms())
+                mol_noH.AddConformer(conf, assignId=True)
+            conf = mol_noH.GetConformer()
+            for k, idx in enumerate(heavy_idx):
+                conf.SetAtomPosition(idx, Point3D(
+                    float(heavy[k][0]), float(heavy[k][1]), float(heavy[k][2])))
+            molH = Chem.AddHs(mol_noH, addCoords=True)
+            return molH.GetConformer().GetPositions()
+        except Exception as e:
+            print(f"    [INIT_POSE] heavy-atom apply failed: "
+                  f"{type(e).__name__}: {e}")
+            return None
+
+    def _get_initial_pose(self, ligand) -> np.ndarray:
+        """Dock-first starting pose. C1: use the REAL docked pose (position +
+        orientation + conformation) reconstructed to full-atom coordinates;
+        only fall back to centroid/offset placement if reconstruction fails.
         """
         print(f"    [INIT_POSE] Attempting Vina docking for initial pose...")
-
+        mol = getattr(ligand, "mol", None)
         try:
             coords = (ligand.conformer_coords
-                      if hasattr(ligand, 'conformer_coords') and ligand.conformer_coords is not None
+                      if getattr(ligand, 'conformer_coords', None) is not None
                       else np.random.randn(20, 3))
-            self.current_ligand = ligand  # Set so _coords_to_pdbqt can access mol
+            self.current_ligand = ligand  # so _coords_to_pdbqt can access mol
             pdbqt_str = self._coords_to_pdbqt(coords)
-            print(f"    [INIT_POSE] PDBQT generated, {len(pdbqt_str)} chars")
 
-            dock_results = self.wm.dock_ligand(pdbqt_str, n_poses=1, exhaustiveness=4)
-            print(f"    [INIT_POSE] dock_ligand returned {len(dock_results)} results")
-
-            if dock_results:
-                best = dock_results[0]
-                print(f"    [INIT_POSE] Best energy: {best.total_energy:.2f} kcal/mol")
-                has_coords = best.docked_coords is not None
-                print(f"    [INIT_POSE] Has docked_coords: {has_coords}")
-
-                if has_coords:
-                    dc = best.docked_coords
-                    print(f"    [INIT_POSE] Docked coords shape: {dc.shape}")
-                    print(f"    [INIT_POSE] Docked center: {dc.mean(axis=0).round(2)}")
-
-                    # Check atom count match
-                    n_orig = len(coords)
-                    n_dock = len(dc)
-                    print(f"    [INIT_POSE] Original atoms: {n_orig}, Docked atoms: {n_dock}")
-
-                    if n_dock == n_orig and best.total_energy < 50.0:
-                        print(f"    [INIT_POSE] SUCCESS — using Vina-docked pose")
-                        return dc
-                    elif n_dock != n_orig:
-                        print(f"    [INIT_POSE] ATOM COUNT MISMATCH — "
-                              f"cannot use docked coords directly")
-                        # Use docked center + original shape as fallback
-                        centered = coords - coords.mean(axis=0)
-                        docked_center = dc.mean(axis=0)
-                        print(f"    [INIT_POSE] Using docked CENTER with original shape")
-                        return centered + docked_center
-                    else:
-                        print(f"    [INIT_POSE] Energy too high ({best.total_energy:.1f}), "
-                              f"using docked center anyway")
-                        centered = coords - coords.mean(axis=0)
-                        return centered + dc.mean(axis=0)
-                else:
-                    print(f"    [INIT_POSE] No docked_coords — coords extraction failed")
-            else:
+            dock_results = self.wm.dock_ligand(
+                pdbqt_str, n_poses=1, exhaustiveness=4)
+            if not dock_results:
                 print(f"    [INIT_POSE] dock_ligand returned empty list!")
+                return self._safe_offset_pose(ligand)
+
+            best = dock_results[0]
+            print(f"    [INIT_POSE] Best energy: {best.total_energy:.2f} kcal/mol")
+            if best.total_energy >= 50.0:
+                print(f"    [INIT_POSE] Energy too high -> offset fallback")
+                return self._safe_offset_pose(ligand)
+
+            # Stage 1: meeko reconstruction (correct, original atom order)
+            docked_pdbqt = getattr(best, "docked_pdbqt", None)
+            if mol is not None and docked_pdbqt:
+                full = self._docked_coords_from_meeko(docked_pdbqt, mol)
+                if full is not None and len(full) == mol.GetNumAtoms():
+                    print(f"    [INIT_POSE] SUCCESS - real docked pose "
+                          f"(meeko, {len(full)} atoms)")
+                    return np.asarray(full)
+
+            # Stage 2: heavy-atom mapping (meeko preserves heavy-atom order)
+            heavy = getattr(best, "docked_heavy_coords", None)
+            if mol is not None and heavy is not None and len(heavy) > 0:
+                full = self._apply_docked_pose_to_mol(mol, heavy)
+                if full is not None:
+                    print(f"    [INIT_POSE] SUCCESS - real docked pose "
+                          f"(heavy-atom map, {len(full)} atoms)")
+                    return np.asarray(full)
+                print(f"    [INIT_POSE] heavy-atom count mismatch "
+                      f"({len(heavy)} docked)")
+
+            # Stage 3: centroid fallback (logged -- not a real pose)
+            dc = best.docked_coords
+            if dc is not None:
+                print(f"    [INIT_POSE] FALLBACK: docked centroid + orig shape "
+                      f"(orientation/conformation lost)")
+                centered = coords - coords.mean(axis=0)
+                return centered + np.asarray(dc).mean(axis=0)
 
         except Exception as e:
             print(f"    [INIT_POSE] EXCEPTION: {type(e).__name__}: {e}")
 
-        print(f"    [INIT_POSE] FALLBACK: using offset placement")
+        print(f"    [INIT_POSE] FALLBACK: offset placement")
         return self._safe_offset_pose(ligand)
 
     def _safe_offset_pose(self, ligand) -> np.ndarray:

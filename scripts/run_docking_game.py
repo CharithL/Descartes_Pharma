@@ -496,6 +496,23 @@ def run_phase3(pocket, vina_model, train_ligands, val_ligands, pdbqt_path):
         traceback.print_exc()
     print()
 
+    # ----- C2: verify interaction features are non-degenerate from real pose --
+    try:
+        from descartes_pharma_docking.interaction.interaction_features import (
+            interaction_feature_report,
+        )
+        env.reset(train_ligands[0])
+        rep = interaction_feature_report(env.pocket, env.current_coords)
+        deg = rep.pop("degenerate")
+        print(f"  [C2] Interaction features from initial docked pose:")
+        for k, v in rep.items():
+            print(f"       {k:28s} {v:.3f}")
+        print(f"  [C2] degenerate={deg}"
+              + ("  <-- WARNING: pose not engaging pocket" if deg else "  (OK)"))
+    except Exception as e:
+        logger.warning(f"  [C2] interaction report failed: {e}")
+    print()
+
     # ------------------------------------------------------------------
     # 3b. Initialize SearchPolicyNetwork
     # ------------------------------------------------------------------

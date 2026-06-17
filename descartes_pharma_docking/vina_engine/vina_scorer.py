@@ -53,7 +53,9 @@ class VinaScore:
     dist_asp32: float = 0.0
     dist_asp228: float = 0.0
     is_penalty: bool = False  # True if score is a penalty (ligand out of bounds)
-    docked_coords: object = None  # np.ndarray of docked pose coordinates (if available)
+    docked_coords: object = None  # np.ndarray of ALL docked-pose atom coords
+    docked_heavy_coords: object = None  # np.ndarray of non-hydrogen docked coords
+    docked_pdbqt: object = None  # docked-pose PDBQT text (for meeko reconstruction)
 
 
 class VinaWorldModel:
@@ -201,9 +203,14 @@ class VinaWorldModel:
 
             energies = self.v.energies(n_poses=n_poses)
 
-            # Write docked poses so we can extract coordinates
+            # Write docked poses so we can extract coordinates + PDBQT text
             self.v.write_poses(tmp_output, n_poses=n_poses)
-            coords_list = self._parse_docked_pdbqt(tmp_output)
+            models = self._parse_docked_pdbqt(tmp_output)
+            try:
+                with open(tmp_output) as fh:
+                    docked_text = fh.read()
+            except OSError:
+                docked_text = None
 
             results = []
             for i, e in enumerate(energies):
@@ -212,8 +219,11 @@ class VinaWorldModel:
                     inter_energy=e[1] if len(e) > 1 else e[0],
                     intra_energy=e[2] if len(e) > 2 else 0.0,
                 )
-                if i < len(coords_list):
-                    score.docked_coords = coords_list[i]
+                if i < len(models):
+                    score.docked_coords = models[i]["all"]
+                    score.docked_heavy_coords = models[i]["heavy"]
+                # n_poses=1 callers: the whole file is the single pose.
+                score.docked_pdbqt = docked_text
                 results.append(score)
 
             self.n_evaluations += 1
@@ -228,34 +238,51 @@ class VinaWorldModel:
                     os.unlink(p)
 
     def _parse_docked_pdbqt(self, pdbqt_path: str) -> list:
-        """Parse multiple models from a docked PDBQT file."""
-        coords_per_model = []
-        current_coords = []
+        """Parse models from a docked PDBQT file.
+
+        Returns a list of dicts, one per model:
+            {"all": (n,3) all-atom coords, "heavy": (m,3) non-hydrogen coords}
+        The AutoDock atom type (last token) is used to drop H/HD atoms so the
+        heavy-atom set can be matched to an RDKit mol's heavy atoms.
+        """
+        models = []
+        cur_all, cur_heavy = [], []
 
         if not os.path.exists(pdbqt_path):
-            return coords_per_model
+            return models
+
+        def _flush():
+            if cur_all:
+                models.append({
+                    "all": np.array(cur_all),
+                    "heavy": (np.array(cur_heavy) if cur_heavy
+                              else np.array(cur_all)),
+                })
 
         with open(pdbqt_path) as f:
             for line in f:
                 if line.startswith('MODEL'):
-                    current_coords = []
+                    cur_all, cur_heavy = [], []
                 elif line.startswith('ENDMDL'):
-                    if current_coords:
-                        coords_per_model.append(np.array(current_coords))
-                    current_coords = []
+                    _flush()
+                    cur_all, cur_heavy = [], []
                 elif line.startswith(('ATOM', 'HETATM')):
                     try:
                         x = float(line[30:38])
                         y = float(line[38:46])
                         z = float(line[46:54])
-                        current_coords.append([x, y, z])
                     except (ValueError, IndexError):
-                        pass
+                        continue
+                    tokens = line.split()
+                    ad_type = tokens[-1] if tokens else 'C'
+                    cur_all.append([x, y, z])
+                    if ad_type.upper() not in ('H', 'HD'):
+                        cur_heavy.append([x, y, z])
 
-        if current_coords and not coords_per_model:
-            coords_per_model.append(np.array(current_coords))
+        if cur_all and not models:
+            _flush()
 
-        return coords_per_model
+        return models
 
     def get_evaluation_count(self) -> int:
         """How many poses have been evaluated (for logging)."""

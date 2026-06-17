@@ -238,3 +238,28 @@ def _pocket_occupancy(
             contacted += 1
 
     return contacted / len(pocket.residues)
+
+
+def interaction_feature_report(
+    pocket: PocketFeatures,
+    ligand_coords: np.ndarray,
+) -> dict:
+    """C2: labeled interaction features + a degeneracy flag.
+
+    `degenerate` is True when the chemistry features are all-zero (ligand far
+    from the pocket) or everything is clashing -- i.e. the pose is not a real
+    binding geometry. Used to verify that a real docked pose (C1) yields
+    sensible, non-degenerate feature values.
+    """
+    feats = compute_interaction_features(pocket, ligand_coords)
+    names = ["dist_asp32", "dist_asp228", "n_hbonds",
+             "hydrophobic_contact_area", "steric_clash_count",
+             "pocket_occupancy_fraction", "closest_wall_dist"]
+    report = {n: float(v) for n, v in zip(names, feats)}
+    n_lig = max(1, len(ligand_coords))
+    all_zero_chem = (report["n_hbonds"] == 0
+                     and report["hydrophobic_contact_area"] == 0
+                     and report["steric_clash_count"] == 0)
+    all_clash = report["steric_clash_count"] >= n_lig
+    report["degenerate"] = bool(all_zero_chem or all_clash)
+    return report
