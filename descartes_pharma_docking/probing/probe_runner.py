@@ -16,7 +16,7 @@ Council controls from DESCARTES-PHARMA v1.3 apply WITHOUT modification.
 import numpy as np
 from sklearn.linear_model import Ridge
 from sklearn.neural_network import MLPRegressor
-from sklearn.model_selection import KFold
+from sklearn.model_selection import KFold, GroupKFold
 from typing import Dict, List, Optional
 import torch
 
@@ -373,19 +373,36 @@ class DESCARTESProbeRunner:
 # =====================================================================
 
 
+def _kfold_splits(X, y, n_splits, groups):
+    """Yield (train_idx, test_idx) splits.
+
+    When `groups` (one label per row, e.g. episode/trajectory id) has at least
+    `n_splits` distinct values, GroupKFold is used so that no group spans both
+    the train and test folds. This is critical for trajectory data: consecutive
+    timesteps within one docking episode are near-identical, so a plain shuffled
+    KFold leaks them across folds and inflates R2. Falls back to shuffled KFold
+    when groups are unavailable or too few (e.g. synthetic/arbitrary targets).
+    """
+    if groups is not None:
+        groups = np.asarray(groups)
+        if len(np.unique(groups)) >= n_splits:
+            return GroupKFold(n_splits=n_splits).split(X, y, groups=groups)
+    return KFold(n_splits=n_splits, shuffle=True, random_state=42).split(X)
+
+
 def cv_ridge_r2(
     X: np.ndarray,
     y: np.ndarray,
     n_splits: int = 5,
     alpha: float = 1.0,
+    groups: Optional[np.ndarray] = None,
 ) -> float:
-    """5-fold cross-validated Ridge R2."""
+    """Cross-validated Ridge R2 (GroupKFold when `groups` is provided)."""
     if len(X) < n_splits * 2:
         return 0.0
 
-    kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
     scores = []
-    for train_idx, test_idx in kf.split(X):
+    for train_idx, test_idx in _kfold_splits(X, y, n_splits, groups):
         ridge = Ridge(alpha=alpha)
         ridge.fit(X[train_idx], y[train_idx])
         scores.append(ridge.score(X[test_idx], y[test_idx]))
@@ -396,14 +413,14 @@ def cv_mlp_r2(
     X: np.ndarray,
     y: np.ndarray,
     n_splits: int = 5,
+    groups: Optional[np.ndarray] = None,
 ) -> float:
-    """5-fold cross-validated MLP R2 (nonlinear probe)."""
+    """5-fold cross-validated MLP R2 (nonlinear probe, GroupKFold-aware)."""
     if len(X) < n_splits * 2:
         return 0.0
 
-    kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
     scores = []
-    for train_idx, test_idx in kf.split(X):
+    for train_idx, test_idx in _kfold_splits(X, y, n_splits, groups):
         mlp = MLPRegressor(
             hidden_layer_sizes=(64, 32),
             max_iter=200,
@@ -421,18 +438,60 @@ def permutation_test(
     y: np.ndarray,
     n_perms: int = 200,
     alpha: float = 1.0,
+    scaffolds: Optional[np.ndarray] = None,
+    groups: Optional[np.ndarray] = None,
 ) -> float:
-    """Permutation test for significance of R2."""
-    real_r2 = cv_ridge_r2(X, y, alpha=alpha)
+    """Permutation test for significance of R2.
+
+    If `scaffolds` is given, target labels are permuted WITHIN each scaffold
+    group only (preserving scaffold-level structure in the null distribution)
+    rather than a plain global shuffle. `groups` (trajectory ids) is forwarded
+    to the CV splitter so the null R2 is computed leak-free, exactly matching
+    how the real R2 is computed.
+    """
+    real_r2 = cv_ridge_r2(X, y, alpha=alpha, groups=groups)
 
     rng = np.random.default_rng(42)
+
+    scaffold_index_groups = None
+    if scaffolds is not None:
+        scaffolds = np.asarray(scaffolds)
+        scaffold_index_groups = [
+            np.where(scaffolds == s)[0] for s in np.unique(scaffolds)
+        ]
+
     null_r2s = []
     for _ in range(n_perms):
-        y_perm = rng.permutation(y)
-        null_r2s.append(cv_ridge_r2(X, y_perm, alpha=alpha))
+        if scaffold_index_groups is None:
+            y_perm = rng.permutation(y)
+        else:
+            y_perm = np.array(y, copy=True)
+            for idx in scaffold_index_groups:
+                if len(idx) > 1:
+                    y_perm[idx] = y[idx[rng.permutation(len(idx))]]
+        null_r2s.append(cv_ridge_r2(X, y_perm, alpha=alpha, groups=groups))
 
     p_value = float(np.mean(np.array(null_r2s) >= real_r2))
     return p_value
+
+
+def one_per_trajectory_indices(
+    episode_ids: np.ndarray, seed: int = 0
+) -> np.ndarray:
+    """Indices selecting one random timestep per trajectory (A2: effective-n).
+
+    Probing all ~30 timesteps of an episode treats correlated samples as
+    independent and inflates significance. Subsampling one timestep per
+    trajectory yields n == number of trajectories of (near-)independent
+    samples for an honest p-value.
+    """
+    episode_ids = np.asarray(episode_ids)
+    rng = np.random.default_rng(seed)
+    chosen = [
+        int(rng.choice(np.where(episode_ids == ep)[0]))
+        for ep in np.unique(episode_ids)
+    ]
+    return np.array(sorted(chosen), dtype=np.int64)
 
 
 def _safe_obs_index(obs: np.ndarray, idx: int, default: float = 0.0) -> float:

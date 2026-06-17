@@ -629,6 +629,23 @@ def run_phase3(pocket, vina_model, train_ligands, val_ligands, pdbqt_path):
     print(f"    Val mean final Vina: {mean_final:.3f}")
     print(f"    Fraction improved:   {improved_frac:.1%}")
 
+    # ----- A4: Random-action baseline on the same validation ligands -----
+    try:
+        from scripts.random_policy_baseline import (
+            random_action_rollout, print_policy_comparison,
+        )
+        print("\n    [A4] Random-action baseline (same val ligands)...")
+        rand_stats = random_action_rollout(
+            env, val_ligands[:50], max_steps=MAX_STEPS, n_actions=22, seed=0,
+        )
+        print_policy_comparison(
+            {"mean_init": float(mean_init), "mean_final": float(mean_final),
+             "frac_improved": float(improved_frac)},
+            rand_stats,
+        )
+    except Exception as e:
+        logger.warning(f"    Random-action baseline failed: {e}")
+
     # ------------------------------------------------------------------
     # 3f. Training summary
     # ------------------------------------------------------------------
@@ -675,6 +692,7 @@ def run_phase4(policy, env, test_ligands, train_ligands):
     H_trained = trained_data["hidden_states"]
     targets = trained_data["targets"]
     smiles_per_step = trained_data["smiles_per_step"]
+    episode_ids = trained_data["episode_ids"]  # A1: GroupKFold trajectory ids
     print(f"    Collected {len(H_trained)} timesteps, hidden_dim={H_trained.shape[1]}")
 
     # ------------------------------------------------------------------
@@ -704,6 +722,7 @@ def run_phase4(policy, env, test_ligands, train_ligands):
     H_untrained = H_untrained[:n]
     targets = {k: v[:n] for k, v in targets.items()}
     smiles_per_step = smiles_per_step[:n]
+    episode_ids = episode_ids[:n]
 
     print(f"    Matched samples: {n}")
 
@@ -722,8 +741,8 @@ def run_phase4(policy, env, test_ligands, train_ligands):
         if tname not in targets or len(targets[tname]) < 20:
             ridge_results[tname] = {"r2_T": 0.0, "r2_U": 0.0, "dR2": 0.0}
             continue
-        r2_t = cv_ridge_r2(H_trained, targets[tname])
-        r2_u = cv_ridge_r2(H_untrained, targets[tname])
+        r2_t = cv_ridge_r2(H_trained, targets[tname], groups=episode_ids)
+        r2_u = cv_ridge_r2(H_untrained, targets[tname], groups=episode_ids)
         dR2 = r2_t - r2_u
         ridge_results[tname] = {"r2_T": r2_t, "r2_U": r2_u, "dR2": dR2}
 
@@ -742,14 +761,15 @@ def run_phase4(policy, env, test_ligands, train_ligands):
         try:
             _, p_val, _ = hardened_probe(
                 H_trained, H_untrained, targets[tname],
-                scaffolds, n_perms=200,
+                scaffolds, n_perms=200, groups=episode_ids,
             )
             perm_results[tname] = p_val
         except Exception as e:
             logger.warning(f"    Permutation failed for {tname}: {e}")
-            # Fallback: simple permutation
+            # Fallback: simple permutation (scaffold-stratified + leak-free)
             perm_results[tname] = permutation_test(
-                H_trained, targets[tname], n_perms=200
+                H_trained, targets[tname], n_perms=200,
+                scaffolds=scaffolds, groups=episode_ids,
             )
 
     # ------------------------------------------------------------------
@@ -1593,6 +1613,7 @@ def _collect_hidden_states_and_targets(policy, env, ligands, device="cpu",
 
     all_targets = defaultdict(list)
     smiles_per_step = []
+    episode_ids = []
 
     n_episodes = len(ligands)
     for ep_idx in range(n_episodes):
@@ -1653,6 +1674,7 @@ def _collect_hidden_states_and_targets(policy, env, ligands, device="cpu",
             all_targets["logp"].append(getattr(lig, "logp", 2.0))
 
             smiles_per_step.append(lig.smiles)
+            episode_ids.append(ep_idx)
 
             if done:
                 break
@@ -1673,6 +1695,7 @@ def _collect_hidden_states_and_targets(policy, env, ligands, device="cpu",
         "hidden_states": H,
         "targets": targets_out,
         "smiles_per_step": smiles_per_step[:n],
+        "episode_ids": np.asarray(episode_ids[:n], dtype=np.int64),
     }
 
 

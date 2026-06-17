@@ -35,6 +35,7 @@ def hardened_probe(
     n_perms: int = 200,
     alpha: float = 1.0,
     random_seed: int = 42,
+    groups: Optional[np.ndarray] = None,
 ) -> Tuple[float, float, bool]:
     """
     Scaffold-stratified permutation probe.
@@ -59,9 +60,9 @@ def hardened_probe(
     assert len(target) == n
     assert len(scaffolds) == n
 
-    # Real delta-R2
-    r2_trained = cv_ridge_r2(trained_emb, target, alpha=alpha)
-    r2_untrained = cv_ridge_r2(untrained_emb, target, alpha=alpha)
+    # Real delta-R2 (GroupKFold via `groups` keeps trajectories out of both folds)
+    r2_trained = cv_ridge_r2(trained_emb, target, alpha=alpha, groups=groups)
+    r2_untrained = cv_ridge_r2(untrained_emb, target, alpha=alpha, groups=groups)
     delta_r2 = r2_trained - r2_untrained
 
     # Build scaffold group indices
@@ -82,9 +83,13 @@ def hardened_probe(
                 perm_order = rng.permutation(len(indices))
                 target_perm[indices] = target[indices[perm_order]]
 
-        # Compute null delta-R2
-        r2_perm_trained = cv_ridge_r2(trained_emb, target_perm, alpha=alpha)
-        r2_perm_untrained = cv_ridge_r2(untrained_emb, target_perm, alpha=alpha)
+        # Compute null delta-R2 (same leak-free CV as the real statistic)
+        r2_perm_trained = cv_ridge_r2(
+            trained_emb, target_perm, alpha=alpha, groups=groups
+        )
+        r2_perm_untrained = cv_ridge_r2(
+            untrained_emb, target_perm, alpha=alpha, groups=groups
+        )
         null_delta = r2_perm_trained - r2_perm_untrained
         null_delta_r2s.append(null_delta)
 
@@ -166,6 +171,7 @@ def run_hardened_probe_suite(
     targets: Dict[str, np.ndarray],
     scaffolds: np.ndarray,
     n_perms: int = 200,
+    groups: Optional[np.ndarray] = None,
 ) -> Dict[str, Dict]:
     """
     Run scaffold-stratified permutation probes for all targets.
@@ -189,6 +195,7 @@ def run_hardened_probe_suite(
             target[:n],
             scaffolds[:n],
             n_perms=n_perms,
+            groups=(np.asarray(groups)[:n] if groups is not None else None),
         )
         results[name] = {
             "delta_r2": delta_r2,
