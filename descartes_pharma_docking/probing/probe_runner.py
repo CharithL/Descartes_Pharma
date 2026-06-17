@@ -363,9 +363,15 @@ class DESCARTESProbeRunner:
     def _get_untrained_hidden_states(
         self, n_samples: int, hidden_dim: int
     ) -> np.ndarray:
-        """Generate hidden states from a randomly initialized network."""
-        rng = np.random.default_rng(99)
-        return rng.normal(0, 0.01, (n_samples, hidden_dim)).astype(np.float32)
+        """Disabled (B3). The untrained control MUST be the same architecture
+        with random init, run through the SAME episodes on the SAME inputs --
+        never Gaussian noise. Collect real untrained hidden states and pass
+        them in explicitly."""
+        raise RuntimeError(
+            "Gaussian-noise untrained baseline is disabled (B3). Run a "
+            "same-architecture, randomly-initialized policy through the same "
+            "episodes and use ITS hidden states as the control."
+        )
 
 
 # =====================================================================

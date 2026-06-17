@@ -729,15 +729,27 @@ def run_phase4(policy, env, test_ligands, train_ligands):
     # ------------------------------------------------------------------
     # 4d. Run Ridge dR2 for 8 binding targets
     # ------------------------------------------------------------------
-    PROBE_TARGETS = [
-        "dist_asp32", "dist_asp228", "n_hbonds", "hydrophobic_contact_area",
-        "steric_clash_count", "vina_score", "pocket_occupancy",
-        "closest_wall_dist",
+    # B1: features split by whether they are FED to the network or not.
+    INPUT_FEATURES = [
+        "dist_asp32", "dist_asp228", "vina_score", "score_improvement",
+        "n_hbonds", "hydrophobic_contact_area", "steric_clash_count",
+        "pocket_occupancy", "closest_wall_dist",
     ]
+    HELD_OUT_FEATURES = [
+        "angle_to_catalytic_dyad",
+        "min_dist_to_S1_subpocket_centroid",
+        "ligand_burial_depth",
+    ]
+    CONFOUND_FEATURES = [
+        "molecular_weight", "num_heavy_atoms", "logp", "random_noise",
+    ]
+    # Ridge+permutation run on input+held-out; confounds get Ridge dR2 only.
+    PROBE_TARGETS = INPUT_FEATURES + HELD_OUT_FEATURES
+    ALL_TARGETS = PROBE_TARGETS + CONFOUND_FEATURES
 
-    print(f"\n  [4/7] Running Ridge dR2 probes for {len(PROBE_TARGETS)} targets...")
+    print(f"\n  [4/7] Running Ridge dR2 probes for {len(ALL_TARGETS)} targets...")
     ridge_results = {}
-    for tname in PROBE_TARGETS:
+    for tname in ALL_TARGETS:
         if tname not in targets or len(targets[tname]) < 20:
             ridge_results[tname] = {"r2_T": 0.0, "r2_U": 0.0, "dR2": 0.0}
             continue
@@ -754,7 +766,7 @@ def run_phase4(policy, env, test_ligands, train_ligands):
         np.zeros(n, dtype=np.int64)
 
     perm_results = {}
-    for tname in PROBE_TARGETS:
+    for tname in ALL_TARGETS:
         if tname not in targets or len(targets[tname]) < 20:
             perm_results[tname] = 1.0
             continue
@@ -775,26 +787,48 @@ def run_phase4(policy, env, test_ligands, train_ligands):
     # ------------------------------------------------------------------
     # 4f. Print results table
     # ------------------------------------------------------------------
-    print(f"\n  [6/7] DESCARTES PROBE RESULTS:")
-    print(f"         Does the GRU encode binding mechanism?\n")
-    print(f"    {'Target':<26} {'Ridge(T)':>9} {'Ridge(U)':>9} "
-          f"{'dR2':>7} {'p-value':>8} {'Verdict':>8}")
-    print("    " + "-" * 70)
+    print(f"\n  [6/7] DESCARTES PROBE RESULTS (categorized):")
+    print(f"         Scientific weight is on HELD-OUT features only.\n")
 
-    n_encoded = 0
-    encoded_targets = []
-    for tname in PROBE_TARGETS:
-        r = ridge_results.get(tname, {"r2_T": 0, "r2_U": 0, "dR2": 0})
-        p = perm_results.get(tname, 1.0)
-        is_enc = r["dR2"] > 0.05 and p < 0.05
-        verdict = "ENC" if is_enc else "ZOMBIE"
-        if is_enc:
-            n_encoded += 1
-            encoded_targets.append(tname)
-        print(f"    {tname:<26} {r['r2_T']:>9.4f} {r['r2_U']:>9.4f} "
-              f"{r['dR2']:>7.4f} {p:>8.4f} {verdict:>8}")
+    def _print_probe_category(title, names):
+        print(f"    {title}")
+        print(f"    {'Target':<34} {'Ridge(T)':>9} {'Ridge(U)':>9} "
+              f"{'dR2':>7} {'p-value':>8} {'Verdict':>8}")
+        print("    " + "-" * 80)
+        enc = []
+        for tname in names:
+            if tname not in ridge_results:
+                continue
+            r = ridge_results[tname]
+            p = perm_results.get(tname, 1.0)
+            is_enc = r["dR2"] > 0.05 and p < 0.05
+            if is_enc:
+                enc.append(tname)
+            print(f"    {tname:<34} {r['r2_T']:>9.4f} {r['r2_U']:>9.4f} "
+                  f"{r['dR2']:>7.4f} {p:>8.4f} {('ENC' if is_enc else 'zombie'):>8}")
+        print()
+        return enc
 
-    print(f"\n    Binding features encoded: {n_encoded}/{len(PROBE_TARGETS)}")
+    _print_probe_category(
+        "INPUT FEATURES (pass-through -- high R2 EXPECTED, not evidence):",
+        INPUT_FEATURES)
+    held_out_encoded = _print_probe_category(
+        "HELD-OUT FEATURES (NOT in input -- encoding implies computation):",
+        HELD_OUT_FEATURES)
+    confound_encoded = _print_probe_category(
+        "CONFOUNDS (must stay zombie):", CONFOUND_FEATURES)
+
+    # B2: vina_score and the other inputs are pass-through; the real result is
+    # held-out encoding only.
+    n_encoded = len(held_out_encoded)
+    encoded_targets = held_out_encoded
+    print(f"    >>> HELD-OUT features encoded: {n_encoded}/"
+          f"{len(HELD_OUT_FEATURES)}  <-- the scientific result")
+    print(f"    Note: vina_score / dist_asp32 / dist_asp228 / n_hbonds are INPUT "
+          f"features fed to the net; high R2 is expected and is NOT evidence")
+    print(f"          of learned mechanism (excluded from the encoded count).")
+    if confound_encoded:
+        print(f"    WARNING: confound(s) appear encoded: {confound_encoded}")
 
     # ------------------------------------------------------------------
     # 4g. Save probe data to disk
@@ -914,17 +948,33 @@ def run_phase5(policy, env, train_ligands, test_ligands,
         if len(H_seed) == 0:
             continue
 
-        # Untrained control for this seed
-        rng_ctrl = np.random.default_rng(seed + 1000)
-        H_ctrl = rng_ctrl.normal(0, 0.01, H_seed.shape).astype(np.float32)
+        # B3: untrained control = SAME architecture, random init, run through
+        # the SAME episodes/inputs (never Gaussian noise).
+        untrained_seed = SearchPolicyNetwork(
+            pocket_dim=policy.pocket_dim,
+            ligand_dim=policy.ligand_dim,
+            interaction_dim=policy.interaction_dim,
+            score_history_len=policy.score_history_len,
+            hidden_dim=128, n_layers=2, n_actions=22,
+        ).to(DEVICE)
+        _set_eval_mode(untrained_seed)
+        ctrl_data = _collect_hidden_states_and_targets(
+            untrained_seed, env, test_ligands[:20], device=DEVICE, label=None
+        )
+        H_ctrl = ctrl_data["hidden_states"]
+        seed_groups = seed_data["episode_ids"]
 
-        # Probe key targets
+        # Probe key targets (GroupKFold via episode ids -> leak-free)
         for tname in KEY_TARGETS:
             if tname not in seed_targets or len(seed_targets[tname]) < 10:
                 continue
-            n_s = min(len(H_seed), len(seed_targets[tname]))
-            r2_t = cv_ridge_r2(H_seed[:n_s], seed_targets[tname][:n_s])
-            r2_u = cv_ridge_r2(H_ctrl[:n_s], seed_targets[tname][:n_s])
+            n_s = min(len(H_seed), len(H_ctrl), len(seed_targets[tname]))
+            if n_s < 10:
+                continue
+            r2_t = cv_ridge_r2(H_seed[:n_s], seed_targets[tname][:n_s],
+                               groups=seed_groups[:n_s])
+            r2_u = cv_ridge_r2(H_ctrl[:n_s], seed_targets[tname][:n_s],
+                               groups=seed_groups[:n_s])
             if r2_t - r2_u > 0.05:
                 seed_pass_counts[tname] += 1
 
@@ -1597,6 +1647,71 @@ def _get_obs_dim(env, ligand):
     return len(obs)
 
 
+def _held_out_features(env) -> dict:
+    """B1: geometric features computed POST-HOC from the real pose, NEVER fed
+    to the network. Encoding any of these implies the GRU actually computed
+    something about binding geometry (not just echoed an input).
+
+    Returns: angle_to_catalytic_dyad (deg), min_dist_to_S1_subpocket_centroid
+    (A), ligand_burial_depth (A). All have safe fallbacks.
+    """
+    out = {
+        "angle_to_catalytic_dyad": 0.0,
+        "min_dist_to_S1_subpocket_centroid": 50.0,
+        "ligand_burial_depth": 0.0,
+    }
+    coords = getattr(env, "current_coords", None)
+    if coords is None or len(coords) < 2:
+        return out
+    coords = np.asarray(coords)
+    lig_center = coords.mean(axis=0)
+    pocket = env.pocket
+
+    cats = {r.resid: np.asarray(r.center)
+            for r in getattr(pocket, "residues", [])
+            if getattr(r, "is_catalytic", False)}
+    c32, c228 = cats.get(32), cats.get(228)
+
+    # angle_to_catalytic_dyad: ligand principal axis vs the Asp32->Asp228 vector
+    if c32 is not None and c228 is not None:
+        dyad = c228 - c32
+        dyad_n = np.linalg.norm(dyad)
+        try:
+            evals, evecs = np.linalg.eigh(np.cov((coords - lig_center).T))
+            axis = evecs[:, -1]
+            if dyad_n > 1e-6 and np.linalg.norm(axis) > 1e-6:
+                cos = abs(float(np.dot(axis, dyad) /
+                                (np.linalg.norm(axis) * dyad_n)))
+                out["angle_to_catalytic_dyad"] = float(
+                    np.degrees(np.arccos(min(1.0, max(0.0, cos)))))
+        except Exception:
+            pass
+        dyad_mid = (c32 + c228) / 2.0
+    else:
+        dyad_mid = np.asarray(getattr(pocket, "pocket_center", lig_center))
+
+    # min_dist_to_S1_subpocket_centroid (S1 center, else hydrophobic centroid)
+    s1 = None
+    sub = getattr(pocket, "sub_pockets", {}) or {}
+    if "S1" in sub and "center" in sub["S1"]:
+        s1 = np.asarray(sub["S1"]["center"], dtype=float)
+    elif getattr(pocket, "hydrophobic_residues", None):
+        s1 = np.mean([np.asarray(r.center)
+                      for r in pocket.hydrophobic_residues], axis=0)
+    if s1 is not None:
+        out["min_dist_to_S1_subpocket_centroid"] = float(
+            np.linalg.norm(lig_center - s1))
+
+    # ligand_burial_depth: projection of ligand center on the buried->opening axis
+    pcenter = np.asarray(getattr(pocket, "pocket_center", lig_center), dtype=float)
+    axis_vec = pcenter - dyad_mid
+    an = np.linalg.norm(axis_vec)
+    if an > 1e-6:
+        out["ligand_burial_depth"] = float(
+            np.dot(lig_center - dyad_mid, axis_vec / an))
+    return out
+
+
 def _collect_hidden_states_and_targets(policy, env, ligands, device="cpu",
                                         label=None):
     """
@@ -1614,6 +1729,7 @@ def _collect_hidden_states_and_targets(policy, env, ligands, device="cpu",
     all_targets = defaultdict(list)
     smiles_per_step = []
     episode_ids = []
+    rng = np.random.default_rng(123)  # for the random_noise confound
 
     n_episodes = len(ligands)
     for ep_idx in range(n_episodes):
@@ -1672,6 +1788,21 @@ def _collect_hidden_states_and_targets(policy, env, ligands, device="cpu",
                 getattr(lig, "molecular_weight", 300.0)
             )
             all_targets["logp"].append(getattr(lig, "logp", 2.0))
+            n_heavy = 20
+            if hasattr(lig, "mol") and lig.mol is not None:
+                try:
+                    n_heavy = lig.mol.GetNumHeavyAtoms()
+                except Exception:
+                    pass
+            all_targets["num_heavy_atoms"].append(float(n_heavy))
+            all_targets["random_noise"].append(float(rng.normal()))
+
+            # Input feature derived from in-observation scores
+            all_targets["score_improvement"].append(float(reward))
+
+            # B1: held-out features (post-hoc, NEVER fed to the network)
+            for _k, _v in _held_out_features(env).items():
+                all_targets[_k].append(_v)
 
             smiles_per_step.append(lig.smiles)
             episode_ids.append(ep_idx)
