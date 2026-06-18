@@ -440,7 +440,8 @@ def run_phase2():
 # PHASE 3: TRAINING
 # ====================================================================
 
-def run_phase3(pocket, vina_model, train_ligands, val_ligands, pdbqt_path):
+def run_phase3(pocket, vina_model, train_ligands, val_ligands, pdbqt_path,
+               pose_cache=None, initial_pose_mode="perturbed_docked"):
     """Train the SearchPolicyNetwork via REINFORCE with continuous Vina reward."""
     t0 = phase_header(3, "TRAINING")
 
@@ -458,8 +459,12 @@ def run_phase3(pocket, vina_model, train_ligands, val_ligands, pdbqt_path):
         pocket_features=pocket,
         max_steps=MAX_STEPS,
         score_history_len=10,
+        initial_pose_mode=initial_pose_mode,
+        pose_cache=pose_cache,
     )
-    print(f"    Env ready. Pocket vector dim: {len(env.pocket_vec)}")
+    print(f"    Env ready (pose_mode={initial_pose_mode}, "
+          f"cache={'on' if pose_cache is not None else 'off'}). "
+          f"Pocket vector dim: {len(env.pocket_vec)}")
 
     # ------------------------------------------------------------------
     # 3a.1 DEBUG: Test dock_ligand in isolation
@@ -599,6 +604,7 @@ def run_phase3(pocket, vina_model, train_ligands, val_ligands, pdbqt_path):
                 f"    Ep {episode+1:>5}/{N_EPISODES} | "
                 f"mean_reward={stats['mean_reward_100']:+.3f} | "
                 f"best_vina={stats['mean_best_score_100']:.2f} | "
+                f"dVina={stats.get('mean_improvement_100', 0.0):+.2f} | "
                 f"policy_loss={stats['policy_loss']:.4f} | "
                 f"vina_evals={total_vina_evals}"
             )
@@ -1879,6 +1885,60 @@ def _fallback_arbitrary_probes(H_trained, H_untrained):
 
 
 # ====================================================================
+# CONFIG + PHASE 2.5 (POSE CACHE)
+# ====================================================================
+
+def _load_training_config() -> dict:
+    """Load configs/training.yaml (D1/D2). Falls back to defaults."""
+    defaults = {
+        "initial_pose_mode": "perturbed_docked",
+        "pose_cache_path": "data/docked_poses_cache.json",
+        "predock_exhaustiveness": 8,
+    }
+    cfg_path = PROJECT_ROOT / "configs" / "training.yaml"
+    try:
+        import yaml
+        if cfg_path.exists():
+            with open(cfg_path) as f:
+                loaded = yaml.safe_load(f) or {}
+            defaults.update({k: loaded[k] for k in defaults if k in loaded})
+            print(f"  Loaded training config: {cfg_path}")
+    except Exception as e:
+        logger.warning(f"  Could not load training config ({e}); using defaults")
+    return defaults
+
+
+def run_phase2_5(pocket, vina_model, all_ligands, config):
+    """Phase 2.5 (D1): dock each unique ligand once and cache the pose so later
+    episodes never re-dock. Skipped if a cache already exists on disk."""
+    from descartes_pharma_docking.training.pose_cache import (
+        PoseCache, predock_ligands,
+    )
+    print("\n")
+    print("=" * 85)
+    print("  PHASE 2.5: POSE PRE-DOCKING (cache)")
+    print("=" * 85)
+    t0 = time.time()
+
+    cache = PoseCache(PROJECT_ROOT / config["pose_cache_path"]).load()
+    if len(cache) > 0:
+        print(f"    Loaded existing cache: {len(cache)} poses "
+              f"-> skipping pre-dock")
+    else:
+        env = DockingEnv(
+            vina_world_model=vina_model, pocket_features=pocket,
+            max_steps=1, initial_pose_mode=config["initial_pose_mode"],
+        )
+        predock_ligands(env, all_ligands, cache,
+                        exhaustiveness=int(config["predock_exhaustiveness"]))
+
+    mins, secs = divmod(time.time() - t0, 60)
+    print(f"\n  Phase 2.5 (pre-docking) completed in {int(mins)}m {secs:.1f}s")
+    print("-" * 85)
+    return cache
+
+
+# ====================================================================
 # MAIN
 # ====================================================================
 
@@ -1926,9 +1986,18 @@ def main():
     (train_ligands, val_ligands, test_ligands,
      train_smi, val_smi, test_smi) = run_phase2()
 
+    # ---- PHASE 2.5: pre-dock pose cache (D1) ----
+    cfg = _load_training_config()
+    pose_cache = run_phase2_5(
+        pocket, vina_model,
+        train_ligands + val_ligands + test_ligands, cfg,
+    )
+
     # ---- PHASE 3 ----
     policy, env, trainer = run_phase3(
         pocket, vina_model, train_ligands, val_ligands, pdbqt_path,
+        pose_cache=pose_cache,
+        initial_pose_mode=cfg["initial_pose_mode"],
     )
 
     # ---- PHASE 4 ----

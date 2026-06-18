@@ -55,6 +55,7 @@ class DockingTrainer:
         # Logging
         self.episode_rewards: deque = deque(maxlen=100)
         self.episode_best_scores: deque = deque(maxlen=100)
+        self.episode_improvements: deque = deque(maxlen=100)  # D3
         self.training_log: List[Dict] = []
 
     def train_episode(self, ligand_features) -> dict:
@@ -68,6 +69,7 @@ class DockingTrainer:
             dict with episode statistics.
         """
         obs = self.env.reset(ligand_features)
+        initial_vina = self.env.current_score  # D3: Vina of the start pose
 
         log_probs = []
         values = []
@@ -141,12 +143,21 @@ class DockingTrainer:
 
         # Log
         total_reward = sum(rewards)
+        final_vina = self.env.current_score  # D3
+        # Improvement: how much the agent lowered Vina from the start pose
+        # (positive = better / more negative final energy).
+        vina_improvement = initial_vina - final_vina
         self.episode_rewards.append(total_reward)
         self.episode_best_scores.append(info["best_score"])
+        self.episode_improvements.append(vina_improvement)
 
         stats = {
             "total_reward": total_reward,
             "best_vina_score": info["best_score"],
+            "initial_vina": float(initial_vina),
+            "final_vina": float(final_vina),
+            "vina_improvement": float(vina_improvement),
+            "mean_improvement_100": float(np.mean(self.episode_improvements)),
             "n_steps": len(rewards),
             "mean_reward_100": float(np.mean(self.episode_rewards)),
             "mean_best_score_100": float(np.mean(self.episode_best_scores)),
@@ -199,6 +210,7 @@ class DockingTrainer:
                     f"Episode {episode+1}/{n_episodes} | "
                     f"Reward: {stats['total_reward']:.2f} | "
                     f"Best Vina: {stats['best_vina_score']:.2f} | "
+                    f"dVina(100): {stats['mean_improvement_100']:+.2f} | "
                     f"Mean(100): {stats['mean_reward_100']:.2f} | "
                     f"Loss: {stats['loss']:.4f}"
                 )

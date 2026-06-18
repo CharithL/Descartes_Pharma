@@ -50,6 +50,8 @@ class DockingEnv:
         rotation_step: float = 15.0,
         torsion_step: float = 30.0,
         convergence_threshold: float = -9.0,
+        initial_pose_mode: str = "perturbed_docked",
+        pose_cache=None,
     ):
         """
         Args:
@@ -71,6 +73,9 @@ class DockingEnv:
         self.rotation_step = rotation_step
         self.torsion_step = torsion_step
         self.convergence_threshold = convergence_threshold
+        # D2: "docked" | "perturbed_docked" | "random"
+        self.initial_pose_mode = initial_pose_mode
+        self.pose_cache = pose_cache  # D1: optional {smiles: coords} cache
 
         # State (set during reset)
         self.current_ligand = None
@@ -373,14 +378,12 @@ class DockingEnv:
                   f"{type(e).__name__}: {e}")
             return None
 
-    def _get_initial_pose(self, ligand) -> np.ndarray:
-        """Dock-first starting pose. C1: use the REAL docked pose (position +
-        orientation + conformation) reconstructed to full-atom coordinates;
-        only fall back to centroid/offset placement if reconstruction fails.
-        """
-        print(f"    [INIT_POSE] Attempting Vina docking for initial pose...")
-        mol = getattr(ligand, "mol", None)
+    def _dock_and_reconstruct(self, ligand, exhaustiveness: int = 4):
+        """Dock the ligand and reconstruct the REAL full-atom docked pose (C1).
+        Returns (n_atoms, 3) coords, or None if docking/reconstruction fails
+        (caller decides the fallback)."""
         try:
+            mol = getattr(ligand, "mol", None)
             coords = (ligand.conformer_coords
                       if getattr(ligand, 'conformer_coords', None) is not None
                       else np.random.randn(20, 3))
@@ -388,24 +391,22 @@ class DockingEnv:
             pdbqt_str = self._coords_to_pdbqt(coords)
 
             dock_results = self.wm.dock_ligand(
-                pdbqt_str, n_poses=1, exhaustiveness=4)
+                pdbqt_str, n_poses=1, exhaustiveness=exhaustiveness)
             if not dock_results:
-                print(f"    [INIT_POSE] dock_ligand returned empty list!")
-                return self._safe_offset_pose(ligand)
-
+                return None
             best = dock_results[0]
-            print(f"    [INIT_POSE] Best energy: {best.total_energy:.2f} kcal/mol")
             if best.total_energy >= 50.0:
-                print(f"    [INIT_POSE] Energy too high -> offset fallback")
-                return self._safe_offset_pose(ligand)
+                print(f"    [INIT_POSE] best energy {best.total_energy:.1f} "
+                      f"too high")
+                return None
 
             # Stage 1: meeko reconstruction (correct, original atom order)
             docked_pdbqt = getattr(best, "docked_pdbqt", None)
             if mol is not None and docked_pdbqt:
                 full = self._docked_coords_from_meeko(docked_pdbqt, mol)
                 if full is not None and len(full) == mol.GetNumAtoms():
-                    print(f"    [INIT_POSE] SUCCESS - real docked pose "
-                          f"(meeko, {len(full)} atoms)")
+                    print(f"    [INIT_POSE] docked pose via meeko "
+                          f"({len(full)} atoms)")
                     return np.asarray(full)
 
             # Stage 2: heavy-atom mapping (meeko preserves heavy-atom order)
@@ -413,25 +414,65 @@ class DockingEnv:
             if mol is not None and heavy is not None and len(heavy) > 0:
                 full = self._apply_docked_pose_to_mol(mol, heavy)
                 if full is not None:
-                    print(f"    [INIT_POSE] SUCCESS - real docked pose "
-                          f"(heavy-atom map, {len(full)} atoms)")
+                    print(f"    [INIT_POSE] docked pose via heavy-atom map "
+                          f"({len(full)} atoms)")
                     return np.asarray(full)
-                print(f"    [INIT_POSE] heavy-atom count mismatch "
-                      f"({len(heavy)} docked)")
 
-            # Stage 3: centroid fallback (logged -- not a real pose)
+            # Stage 3: centroid fallback (orientation/conformation lost)
             dc = best.docked_coords
             if dc is not None:
-                print(f"    [INIT_POSE] FALLBACK: docked centroid + orig shape "
-                      f"(orientation/conformation lost)")
+                print(f"    [INIT_POSE] centroid-only pose (orientation lost)")
                 centered = coords - coords.mean(axis=0)
                 return centered + np.asarray(dc).mean(axis=0)
-
         except Exception as e:
             print(f"    [INIT_POSE] EXCEPTION: {type(e).__name__}: {e}")
+        return None
 
-        print(f"    [INIT_POSE] FALLBACK: offset placement")
-        return self._safe_offset_pose(ligand)
+    def _perturb_pose(self, coords, rng=None) -> np.ndarray:
+        """D2 'perturbed_docked': displace the docked pose by 3-5 A and apply a
+        random rotation so the agent must re-find the pocket (a regime Vina has
+        not already trivially solved)."""
+        rng = rng or np.random.default_rng()
+        coords = np.asarray(coords, dtype=float)
+        center = coords.mean(axis=0)
+        axis = rng.normal(size=3)
+        axis /= (np.linalg.norm(axis) + 1e-9)
+        R = _axis_angle_matrix(axis, rng.uniform(0, 2 * np.pi))
+        out = (R @ (coords - center).T).T + center
+        disp = rng.normal(size=3)
+        disp /= (np.linalg.norm(disp) + 1e-9)
+        return out + disp * rng.uniform(3.0, 5.0)
+
+    def _get_initial_pose(self, ligand) -> np.ndarray:
+        """Starting pose, governed by initial_pose_mode (D2) and the optional
+        pose cache (D1):
+          'random'           -> safe offset placement (no docking)
+          'docked'           -> the real Vina-docked pose (cached if available)
+          'perturbed_docked' -> docked pose + random 3-5 A shift & rotation
+        """
+        mode = self.initial_pose_mode
+        if mode == "random":
+            return self._safe_offset_pose(ligand)
+
+        # Base docked pose: cache first (D1), else dock once and cache it.
+        smi = getattr(ligand, "smiles", None)
+        base = None
+        if (self.pose_cache is not None and smi is not None
+                and smi in self.pose_cache):
+            base = self.pose_cache.get(smi)
+        if base is None:
+            print(f"    [INIT_POSE] docking (mode={mode})...")
+            base = self._dock_and_reconstruct(ligand, exhaustiveness=4)
+            if (base is not None and self.pose_cache is not None
+                    and smi is not None):
+                self.pose_cache.put(smi, base)
+        if base is None:
+            print(f"    [INIT_POSE] FALLBACK: offset placement")
+            return self._safe_offset_pose(ligand)
+
+        if mode == "perturbed_docked":
+            return self._perturb_pose(np.asarray(base))
+        return np.asarray(base)  # "docked"
 
     def _safe_offset_pose(self, ligand) -> np.ndarray:
         """Fallback: place ligand near pocket with safe offset to avoid clashes."""
@@ -681,3 +722,17 @@ def _rotation_matrix(axis_idx: int, angle: float) -> np.ndarray:
             [s, c, 0],
             [0, 0, 1],
         ])
+
+
+def _axis_angle_matrix(axis: np.ndarray, angle: float) -> np.ndarray:
+    """3x3 rotation matrix about an arbitrary unit axis (Rodrigues formula)."""
+    axis = np.asarray(axis, dtype=float)
+    axis = axis / (np.linalg.norm(axis) + 1e-12)
+    x, y, z = axis
+    c, s = np.cos(angle), np.sin(angle)
+    C = 1.0 - c
+    return np.array([
+        [c + x * x * C, x * y * C - z * s, x * z * C + y * s],
+        [y * x * C + z * s, c + y * y * C, y * z * C - x * s],
+        [z * x * C - y * s, z * y * C + x * s, c + z * z * C],
+    ])

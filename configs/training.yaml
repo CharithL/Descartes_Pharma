@@ -1,0 +1,14 @@
+# DESCARTES-PHARMA v2.0 -- docking-game training configuration
+
+# D2: starting-pose regime for the RL agent.
+#   docked            - start at Vina's docked pose (agent can only refine)
+#   perturbed_docked  - Vina pose + random 3-5 A shift & rotation (DEFAULT;
+#                       the interesting regime -- the agent must re-find the
+#                       pocket, which Vina has not already trivially solved)
+#   random            - random placement near the pocket
+initial_pose_mode: perturbed_docked
+
+# D1: docking-pose cache. Each unique ligand is docked ONCE (Phase 2.5) and the
+# pose is reused, instead of re-docking every episode.
+pose_cache_path: data/docked_poses_cache.json
+predock_exhaustiveness: 8
