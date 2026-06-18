@@ -446,14 +446,15 @@ def run_phase2():
 # ====================================================================
 
 def run_phase3(pocket, vina_model, train_ligands, val_ligands, pdbqt_path,
-               pose_cache=None, initial_pose_mode="perturbed_docked"):
+               pose_cache=None, initial_pose_mode="perturbed_docked",
+               n_episodes=500, max_steps=30):
     """Train the SearchPolicyNetwork via REINFORCE with continuous Vina reward."""
     t0 = phase_header(3, "TRAINING")
 
-    N_EPISODES = 5     # DEBUG: reduced to 5 to diagnose initial pose placement
-    MAX_STEPS = 10     # DEBUG: reduced steps for faster iteration
-    LOG_INTERVAL = 50
-    SAVE_INTERVAL = 100
+    N_EPISODES = n_episodes
+    MAX_STEPS = max_steps
+    LOG_INTERVAL = max(1, min(50, N_EPISODES // 4))  # always log a few times
+    SAVE_INTERVAL = max(50, N_EPISODES // 5)
 
     # ------------------------------------------------------------------
     # 3a. Initialize DockingEnv
@@ -1899,6 +1900,8 @@ def _load_training_config() -> dict:
         "initial_pose_mode": "perturbed_docked",
         "pose_cache_path": "data/docked_poses_cache.json",
         "predock_exhaustiveness": 8,
+        "n_train_episodes": 500,
+        "train_max_steps": 30,
     }
     cfg_path = PROJECT_ROOT / "configs" / "training.yaml"
     try:
@@ -2012,10 +2015,13 @@ def main():
     )
 
     # ---- PHASE 3 ----
+    n_ep = 5 if smoke else int(cfg["n_train_episodes"])
+    n_steps = 10 if smoke else int(cfg["train_max_steps"])
     policy, env, trainer = run_phase3(
         pocket, vina_model, train_ligands, val_ligands, pdbqt_path,
         pose_cache=pose_cache,
         initial_pose_mode=cfg["initial_pose_mode"],
+        n_episodes=n_ep, max_steps=n_steps,
     )
 
     # ---- PHASE 4 ----

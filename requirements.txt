@@ -1,17 +1,25 @@
-# DESCARTES-PHARMA v1.2 Dependencies
+# DESCARTES-PHARMA dependencies
 # Core scientific computing
 numpy>=1.24.0
 scipy>=1.10.0
 scikit-learn>=1.2.0
 pandas>=2.0.0
+pyyaml>=6.0
 
 # Deep learning
 torch>=2.0.0
 torchvision>=0.15.0
 
-# Chemistry / Drug Discovery
+# Chemistry / drug discovery
 rdkit>=2023.03.1
 PyTDC>=0.4.0
+
+# Docking game (v2.0): AutoDock Vina + ligand/receptor prep
+vina>=1.2.5
+meeko>=0.5
+gemmi>=0.6          # required by meeko's RDKitMolCreate pose reconstruction
+biopython>=1.81     # pocket parsing + receptor prep
+# NOTE: also install the Open Babel binary via apt: apt-get install -y openbabel
 
 # Visualization
 matplotlib>=3.7.0
@@ -20,12 +28,3 @@ seaborn>=0.12.0
 # Utilities
 tqdm>=4.65.0
 joblib>=1.2.0
-
-# Optional: Neuroscience datasets
-# allensdk>=2.15.0
-
-# Optional: AlphaFold integration
-# biopython>=1.81
-
-# Optional: LLM integration (v1.1 balloon expansion)
-# anthropic>=0.18.0

@@ -12,3 +12,8 @@ initial_pose_mode: perturbed_docked
 # pose is reused, instead of re-docking every episode.
 pose_cache_path: data/docked_poses_cache.json
 predock_exhaustiveness: 8
+
+# Phase 3 RL training length (the `--smoke` flag overrides these with 5 / 10).
+# The old code was hardcoded to 5 episodes -- far too few for a real policy.
+n_train_episodes: 500
+train_max_steps: 30
