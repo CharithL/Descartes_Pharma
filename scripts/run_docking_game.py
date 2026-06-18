@@ -1979,12 +1979,25 @@ def main():
 
     total_start = time.time()
 
+    # Smoke test (spec VERIFICATION): small dataset, phases 1-4 only,
+    # NO 20-seed ensemble. Run: python -m scripts.run_docking_game --smoke
+    smoke = ("--smoke" in sys.argv) or ("--smoke-test" in sys.argv)
+    if smoke:
+        print("  *** SMOKE TEST MODE: capped dataset, phases 1-4 only "
+              "(no 20-seed ensemble) ***\n")
+
     # ---- PHASE 1 ----
     pocket, vina_model, test_ligands_p1, pdbqt_path = run_phase1()
 
     # ---- PHASE 2 ----
     (train_ligands, val_ligands, test_ligands,
      train_smi, val_smi, test_smi) = run_phase2()
+
+    if smoke:  # cap to a handful so the smoke test is fast
+        train_ligands, val_ligands, test_ligands = (
+            train_ligands[:15], val_ligands[:8], test_ligands[:8])
+        print(f"  [SMOKE] capped ligands: train={len(train_ligands)} "
+              f"val={len(val_ligands)} test={len(test_ligands)}")
 
     # ---- PHASE 2.5: pre-dock pose cache (D1) ----
     cfg = _load_training_config()
@@ -2006,15 +2019,21 @@ def main():
         policy, env, test_ligands, train_ligands,
     )
 
-    # ---- PHASE 5 ----
-    final_verdicts, seed_pass_counts, ceiling, ablation_results = run_phase5(
-        policy, env, train_ligands, test_ligands,
-        H_trained, H_untrained, targets, scaffolds,
-        ridge_results, perm_results, encoded_targets,
-    )
+    if smoke:
+        print("\n  [SMOKE] Phases 1-4 complete. Skipping Phase 5 (20-seed "
+              "ensemble) and Phase 6 per the smoke-test guard.")
+        print("  [SMOKE] Check above: [C2] non-degenerate features, the "
+              "HELD-OUT probe table, and the [A4] random-action comparison.")
+    else:
+        # ---- PHASE 5 ----
+        final_verdicts, seed_pass_counts, ceiling, ablation_results = run_phase5(
+            policy, env, train_ligands, test_ligands,
+            H_trained, H_untrained, targets, scaffolds,
+            ridge_results, perm_results, encoded_targets,
+        )
 
-    # ---- PHASE 6 ----
-    run_phase6(ridge_results, perm_results, final_verdicts, seed_pass_counts)
+        # ---- PHASE 6 ----
+        run_phase6(ridge_results, perm_results, final_verdicts, seed_pass_counts)
 
     # ---- FINAL SUMMARY ----
     total_elapsed = time.time() - total_start
