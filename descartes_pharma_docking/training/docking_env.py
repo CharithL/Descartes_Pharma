@@ -555,12 +555,55 @@ class DockingEnv:
             )
             if bond_idx < len(rotatable_bonds):
                 bond = rotatable_bonds[bond_idx]
-                coords = self._rotate_around_bond(
-                    coords, bond, np.radians(self.torsion_step)
+                coords = self._apply_torsion(
+                    coords, bond, self.torsion_step
                 )
             # If bond_idx >= number of rotatable bonds, no-op
 
         return coords
+
+    def _apply_torsion(self, coords, bond, delta_deg):
+        """E2: proper torsion via RDKit SetDihedralDeg -- rotates the correct
+        fragment using molecular connectivity (the old index-based rotation was
+        geometrically wrong for branched molecules). Falls back to a no-op if
+        the mol or a valid dihedral is unavailable."""
+        mol = getattr(self.current_ligand, "mol", None)
+        if mol is None:
+            return coords
+        try:
+            from rdkit import Chem
+            from rdkit.Chem import rdMolTransforms
+            from rdkit.Geometry import Point3D
+            i, j = int(bond[0]), int(bond[1])
+            m = Chem.Mol(mol)
+            n = min(len(coords), m.GetNumAtoms())
+            if m.GetNumConformers() == 0:
+                m.AddConformer(Chem.Conformer(m.GetNumAtoms()), assignId=True)
+            conf = m.GetConformer()
+            for k in range(n):
+                conf.SetAtomPosition(k, Point3D(
+                    float(coords[k][0]), float(coords[k][1]),
+                    float(coords[k][2])))
+            ai = self._dihedral_neighbor(m, i, j)
+            bj = self._dihedral_neighbor(m, j, i)
+            if ai is None or bj is None:
+                return coords
+            cur = rdMolTransforms.GetDihedralDeg(conf, ai, i, j, bj)
+            rdMolTransforms.SetDihedralDeg(conf, ai, i, j, bj, cur + delta_deg)
+            return np.asarray(conf.GetPositions())[:len(coords)]
+        except Exception:
+            return coords
+
+    @staticmethod
+    def _dihedral_neighbor(mol, center, exclude):
+        """A neighbor atom index of `center` other than `exclude` (prefer a
+        heavy atom) -- the reference atom that defines the dihedral."""
+        nbrs = [a.GetIdx() for a in mol.GetAtomWithIdx(center).GetNeighbors()
+                if a.GetIdx() != exclude]
+        if not nbrs:
+            return None
+        heavy = [k for k in nbrs if mol.GetAtomWithIdx(k).GetSymbol() != 'H']
+        return heavy[0] if heavy else nbrs[0]
 
     def _rotate_around_bond(
         self, coords: np.ndarray, bond: tuple, angle: float

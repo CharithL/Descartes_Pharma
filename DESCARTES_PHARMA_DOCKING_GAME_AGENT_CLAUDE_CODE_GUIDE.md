@@ -1491,15 +1491,30 @@ class DockingEnv:
         return centered + self.pocket.pocket_center + offset
     
     def _coords_to_pdbqt(self, coords: np.ndarray) -> str:
-        """Convert numpy coordinates to PDBQT string for Vina."""
-        # Simplified — production version uses MolToPDBQTBlock from meeko
-        lines = ["MODEL 1"]
+        """Convert coordinates to a Vina-ready ligand PDBQT.
+
+        IMPORTANT (E1): use meeko (or Open Babel) for CORRECT AutoDock atom
+        types (donor/acceptor/aromatic/charge) and ROOT/ENDROOT framing. Do NOT
+        label every atom "C" and do NOT emit MODEL/ENDMDL tags — Vina rejects
+        the tags, and all-"C" typing makes the score depend only on sterics
+        (chemistry is lost). The earlier simplified snippet here was wrong; the
+        authoritative implementation is in
+        descartes_pharma_docking/training/docking_env.py (_mol_coords_to_pdbqt),
+        which tries meeko → obabel → a manual ROOT/ENDROOT writer with proper
+        per-element AD types.
+        """
+        if getattr(self, "current_ligand", None) is not None \
+                and getattr(self.current_ligand, "mol", None) is not None:
+            return self._mol_coords_to_pdbqt(self.current_ligand.mol, coords)
+
+        # Manual fallback (no RDKit mol): ROOT/ENDROOT, never MODEL/ENDMDL.
+        lines = ["ROOT"]
         for i, (x, y, z) in enumerate(coords):
-            atom_name = "C" if i < len(coords) else "H"
             lines.append(
-                f"ATOM  {i+1:5d} {atom_name:4s} LIG A   1    "
-                f"{x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00    0.000 {atom_name}")
-        lines.append("ENDMDL")
+                f"HETATM{i+1:5d}  C   LIG A   1    "
+                f"{x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00    +0.000  C")
+        lines.append("ENDROOT")
+        lines.append("END")
         return "\n".join(lines)
 ```
 
