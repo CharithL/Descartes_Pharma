@@ -391,6 +391,11 @@ def run_phase2():
     # ------------------------------------------------------------------
     print("\n  [1/3] Loading full BACE1 dataset...")
     all_smiles, all_labels = _load_bace_dataset()
+    if ("--smoke" in sys.argv) or ("--smoke-test" in sys.argv):
+        # Cap BEFORE conformer generation so the smoke test stays fast.
+        all_smiles = all_smiles[:40]
+        all_labels = all_labels[:40] if all_labels is not None else None
+        print("    [SMOKE] capped dataset to 40 molecules (pre-conformer)")
     print(f"    Total molecules: {len(all_smiles)}")
     if all_labels is not None:
         n_active = sum(1 for l in all_labels if l == 1)
