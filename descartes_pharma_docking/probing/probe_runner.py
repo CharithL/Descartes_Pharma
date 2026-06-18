@@ -17,6 +17,8 @@ import numpy as np
 from sklearn.linear_model import Ridge
 from sklearn.neural_network import MLPRegressor
 from sklearn.model_selection import KFold, GroupKFold
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import make_pipeline
 from typing import Dict, List, Optional
 import torch
 
@@ -409,9 +411,15 @@ def cv_ridge_r2(
 
     scores = []
     for train_idx, test_idx in _kfold_splits(X, y, n_splits, groups):
-        ridge = Ridge(alpha=alpha)
-        ridge.fit(X[train_idx], y[train_idx])
-        scores.append(ridge.score(X[test_idx], y[test_idx]))
+        # Standardize features per-fold (fit on train only). Without this,
+        # ill-conditioned hidden states make Ridge extrapolate catastrophically
+        # on held-out trajectory groups (R2 of -1e13 etc.).
+        model = make_pipeline(StandardScaler(), Ridge(alpha=alpha))
+        model.fit(X[train_idx], y[train_idx])
+        s = model.score(X[test_idx], y[test_idx])
+        # A model worse than the mean means "no linear signal"; the magnitude
+        # of a hugely-negative R2 is a test-fold artifact, so floor it at -1.
+        scores.append(max(s, -1.0) if np.isfinite(s) else -1.0)
     return float(np.mean(scores))
 
 
@@ -434,8 +442,10 @@ def cv_mlp_r2(
             early_stopping=True,
             validation_fraction=0.15,
         )
-        mlp.fit(X[train_idx], y[train_idx])
-        scores.append(mlp.score(X[test_idx], y[test_idx]))
+        model = make_pipeline(StandardScaler(), mlp)
+        model.fit(X[train_idx], y[train_idx])
+        s = model.score(X[test_idx], y[test_idx])
+        scores.append(max(s, -1.0) if np.isfinite(s) else -1.0)
     return float(np.mean(scores))
 
 
