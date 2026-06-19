@@ -515,3 +515,85 @@ def _safe_obs_index(obs: np.ndarray, idx: int, default: float = 0.0) -> float:
     if idx < len(obs):
         return float(obs[idx])
     return default
+
+
+# =====================================================================
+# Triangulation: combine read-out probing with the read-the-function modules
+# =====================================================================
+
+
+def triangulate_verdicts(category_features, probe, mdl, jac, sindy,
+                         ablation=None, dr2_hi=0.05, p_hi=0.05,
+                         mdl_hi=0.1, jac_hi=0.005, sindy_hi=0.3):
+    """One combined label per feature from up to five signals.
+
+      probe  : {feature: {"dR2", "p"}}            present in representation?
+      mdl    : {feature: compression_ratio}       present, capacity-controlled?
+      jac    : {feature: delta_share or None}     output depends on it? (None = not an input dim)
+      sindy  : {feature: (pc, corr) or None}      dynamics organize around it?
+      ablation: optional {feature: "DIRECT"/...}   necessary?
+
+    Labels (for input-mapped features, which have a Jacobian):
+      LOAD_BEARING   present AND used AND (causal or unknown)
+      RETAINED_INERT present AND not used   (in the representation, doesn't drive behaviour)
+      USED_NONLINEAR used AND not (linearly) present  (check the MLP probe)
+      ZOMBIE         neither
+    Held-out features have no input dim, so usage is read from SINDy dynamics
+    (J3 coordinate-alignment would give a direct signal):
+      COMPUTED_DYNAMIC present AND dynamics-linked
+      REPRESENTED      present only
+      ZOMBIE           neither
+    """
+    out = {}
+    for cat, feats in category_features.items():
+        for f in feats:
+            pr = probe.get(f, {})
+            dr2 = float(pr.get("dR2", 0.0))
+            p = float(pr.get("p", 1.0))
+            comp = float(mdl.get(f, 0.0) or 0.0)
+            jd = jac.get(f, None)
+            link = sindy.get(f, None)
+            abl = ablation.get(f) if ablation else None
+
+            present = (dr2 > dr2_hi and p < p_hi) or (comp > mdl_hi)
+            if jd is not None:
+                used = jd > jac_hi
+                causal = (abl == "DIRECT") if abl is not None else None
+                if present and used and (causal is None or causal):
+                    label = "LOAD_BEARING"
+                elif present and not used:
+                    label = "RETAINED_INERT"
+                elif used and not present:
+                    label = "USED_NONLINEAR"
+                else:
+                    label = "ZOMBIE"
+            else:
+                linked = link is not None and abs(link[1]) > sindy_hi
+                if present and linked:
+                    label = "COMPUTED_DYNAMIC"
+                elif present:
+                    label = "REPRESENTED"
+                else:
+                    label = "ZOMBIE"
+
+            out[f] = {"label": label, "category": cat, "dR2": dr2, "p": p,
+                      "mdl": comp, "jac": jd, "sindy": link, "ablation": abl}
+    return out
+
+
+def print_triangulation(category_features, verdicts):
+    """Print the triangulation table grouped by INPUT / HELD-OUT / CONFOUND."""
+    print("\n  TRIANGULATION VERDICT (probe x MDL x Jacobian x SINDy):")
+    for cat, feats in category_features.items():
+        print(f"\n    {cat}")
+        print(f"    {'feature':<34}{'probe_dR2':>10}{'mdl':>8}"
+              f"{'jac_d':>9}{'sindy':>15}{'label':>17}")
+        print("    " + "-" * 93)
+        for f in feats:
+            v = verdicts.get(f)
+            if not v:
+                continue
+            js = f"{v['jac']:+.3f}" if v['jac'] is not None else "n/a"
+            sl = (f"{v['sindy'][0]}:{v['sindy'][1]:+.2f}" if v['sindy'] else "-")
+            print(f"    {f:<34}{v['dR2']:>10.3f}{v['mdl']:>8.2f}"
+                  f"{js:>9}{sl:>15}{v['label']:>17}")

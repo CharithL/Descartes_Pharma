@@ -860,6 +860,79 @@ def run_phase4(policy, env, test_ligands, train_ligands):
         print(f"    WARNING: confound(s) appear encoded: {confound_encoded}")
 
     # ------------------------------------------------------------------
+    # 4f.2 TRIANGULATION: read-the-function modules (J, S, M) + combined label
+    # ------------------------------------------------------------------
+    try:
+        from descartes_pharma_docking.probing.jacobian_attribution import (
+            attribution_delta, delta_share_by_feature,
+        )
+        from descartes_pharma_docking.probing.mdl_probe import mdl_for_targets
+        from descartes_pharma_docking.probing.sindy_dynamics import (
+            fit_sindy_dynamics, format_sindy_report,
+        )
+        from descartes_pharma_docking.probing.probe_runner import (
+            triangulate_verdicts, print_triangulation,
+        )
+        from collections import OrderedDict
+
+        observations = np.asarray(trained_data["observations"])[:n]
+        obs_for_jac = observations[:300]  # cap IG cost; shares are an aggregate
+
+        # Map known observation dims to feature names (rest stay x<i>).
+        pocket_len = len(env.pocket_vec)
+        io = pocket_len + 16
+        obs_dim = observations.shape[1] if observations.ndim == 2 else 0
+        idx_name = {io + 0: "dist_asp32", io + 1: "dist_asp228",
+                    io + 5: "n_hbonds", io + 6: "hydrophobic_contact_area",
+                    io + 7: "steric_clash_count", io + 8: "pocket_occupancy",
+                    obs_dim - 1: "vina_score"}
+        feat_names = [idx_name.get(i, f"x{i}") for i in range(obs_dim)]
+
+        # Module J: trained-minus-untrained IG attribution per input dim.
+        print("\n  [J] Jacobian/IG attribution (trained vs untrained)...")
+        cat_of = {f: "INPUT" for f in INPUT_FEATURES}
+        cat_of.update({f: "CONFOUND" for f in CONFOUND_FEATURES})
+        jac_rows = attribution_delta(policy, untrained_policy, obs_for_jac,
+                                     feature_names=feat_names, categories=cat_of,
+                                     ig_steps=16)
+        jac_all = delta_share_by_feature(jac_rows)
+        jac_map = {f: jac_all.get(f) for f in idx_name.values()}
+
+        # Module M: MDL compression next to dR2 for every target.
+        print("  [M] MDL prequential compression...")
+        mdl_res = mdl_for_targets(H_trained, targets, episode_ids)
+        mdl_map = {k: v["compression_ratio"] for k, v in mdl_res.items()}
+
+        # Module S: SINDy reduced dynamics + PC<->feature links.
+        print("  [S] SINDy reduced dynamics...")
+        sindy_res = fit_sindy_dynamics(H_trained, episode_ids, targets)
+        sindy_links = {}
+        for pc, row in sindy_res.get("pc_feature_corr", {}).items():
+            for fname, c in row.items():
+                cur = sindy_links.get(fname)
+                if cur is None or abs(c) > abs(cur[1]):
+                    sindy_links[fname] = (pc, float(c))
+
+        category_features = OrderedDict([
+            ("INPUT FEATURES", INPUT_FEATURES),
+            ("HELD-OUT FEATURES", HELD_OUT_FEATURES),
+            ("CONFOUNDS", CONFOUND_FEATURES),
+        ])
+        probe_map = {f: {"dR2": ridge_results.get(f, {}).get("dR2", 0.0),
+                         "p": perm_results.get(f, 1.0)} for f in ALL_TARGETS}
+        verdicts = triangulate_verdicts(
+            category_features, probe_map, mdl_map, jac_map, sindy_links,
+        )
+        print_triangulation(category_features, verdicts)
+        print("\n" + format_sindy_report(sindy_res))
+        print("    [J3 note] held-out usage read from SINDy dynamics; "
+              "coordinate-level gradient alignment (J3) deferred.")
+    except Exception as e:
+        logger.warning(f"    Triangulation (J/S/M) failed: {e}")
+        import traceback
+        traceback.print_exc()
+
+    # ------------------------------------------------------------------
     # 4g. Save probe data to disk
     # ------------------------------------------------------------------
     print(f"\n  [7/7] Saving probe data...")
@@ -1758,6 +1831,7 @@ def _collect_hidden_states_and_targets(policy, env, ligands, device="cpu",
     all_targets = defaultdict(list)
     smiles_per_step = []
     episode_ids = []
+    observations = []  # the obs that produced each hidden state (Module J)
     rng = np.random.default_rng(123)  # for the random_noise confound
 
     n_episodes = len(ligands)
@@ -1772,6 +1846,8 @@ def _collect_hidden_states_and_targets(policy, env, ligands, device="cpu",
                 action, _, _, h = policy.select_action(
                     obs_t, h, temperature=0.1
                 )
+            # Log the observation that produced this hidden state (Module J).
+            observations.append(np.asarray(obs, dtype=np.float32))
             obs, reward, done, info = env.step(action)
 
             # Record targets
@@ -1856,6 +1932,7 @@ def _collect_hidden_states_and_targets(policy, env, ligands, device="cpu",
         "targets": targets_out,
         "smiles_per_step": smiles_per_step[:n],
         "episode_ids": np.asarray(episode_ids[:n], dtype=np.int64),
+        "observations": np.asarray(observations[:n], dtype=np.float32),
     }
 
 
@@ -2034,7 +2111,9 @@ def main():
         print("\n  [SMOKE] Phases 1-4 complete. Skipping Phase 5 (20-seed "
               "ensemble) and Phase 6 per the smoke-test guard.")
         print("  [SMOKE] Check above: [C2] non-degenerate features, the "
-              "HELD-OUT probe table, and the [A4] random-action comparison.")
+              "HELD-OUT probe table, the [A4] random-action comparison, and the")
+        print("          TRIANGULATION table (J attribution shares, M compression, "
+              "S PC<->feature map + combined labels).")
     else:
         # ---- PHASE 5 ----
         final_verdicts, seed_pass_counts, ceiling, ablation_results = run_phase5(

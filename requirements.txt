@@ -19,6 +19,7 @@ vina>=1.2.5
 meeko>=0.5
 gemmi>=0.6          # required by meeko's RDKitMolCreate pose reconstruction
 biopython>=1.81     # pocket parsing + receptor prep
+pysindy>=1.7        # Module S: symbolic dynamics of the GRU hidden state
 # NOTE: also install the Open Babel binary via apt: apt-get install -y openbabel
 
 # Visualization
